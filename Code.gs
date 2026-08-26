@@ -2,7 +2,7 @@
  * Re:年モノ - core
  *
  * Configで指定した複数フォルダ / 複数ユーザーについて、
- * 「昨年の今頃が、昨年の他時期より特に活発だった」ファイルを評価する。
+ * 「昨年の今頃が、昨年度の他時期より特に活発だった」ファイルを評価する。
  */
 const REINEN_TIME_ZONE = 'Asia/Tokyo';
 
@@ -36,7 +36,7 @@ function runReinenMono() {
   const result = {
     count: recommendations.length,
     spreadsheetUrl: runtime.spreadsheet.getUrl(),
-    comparisonYear: windows.comparisonYear,
+    comparisonFiscalYear: windows.fiscalYear,
     folders: runtime.folders.length,
     users: runtime.users.length,
   };
@@ -55,7 +55,7 @@ function diagnoseHistory() {
   ).map((stat) => finalizeSeasonalityStats_(stat, windows));
 
   const result = {
-    comparisonYear: windows.comparisonYear,
+    comparisonFiscalYear: windows.fiscalYear,
     comparisonStart: windows.comparisonStart.toISOString(),
     comparisonEndExclusive: windows.comparisonEnd.toISOString(),
     seasonalStart: windows.seasonalStart.toISOString(),
@@ -74,7 +74,7 @@ function diagnoseHistory() {
 }
 
 /**
- * 昨年1年間を一度取得し、その中で「今頃」と「その他」を分けて集計する。
+ * 昨年度（4/1〜翌3/31）を一度取得し、その中で「今頃」と「その他」を分けて集計する。
  */
 function querySeasonalityStatsForConfig_(runtime, windows, settings) {
   const stats = {};
@@ -231,7 +231,7 @@ function buildRecommendations_(seasonalityStats, now, windows, settings) {
       past.seasonalEditActivities >= settings.minSeasonalEditActivities;
     if (!seasonalEnough) return;
 
-    // 「今頃」の活動密度が、昨年のその他期間の最低2倍あるものだけ残す。
+    // 「今頃」の活動密度が、昨年度のその他期間の最低2倍あるものだけ残す。
     if (past.seasonalLift < settings.minSeasonalLift) return;
 
     const expectedStart = past.firstActivity
@@ -296,10 +296,11 @@ function finalizeSeasonalityStats_(stat, windows) {
   );
   const backgroundDays = Math.max(comparisonDays - seasonalDays, 1);
 
+  // 活動回数ではなく「その期間のうち何日に動いていたか」という活動密度で比較する。
   const seasonalRate = seasonalActiveDays / seasonalDays;
   const backgroundRate = backgroundActiveDays / backgroundDays;
 
-  // 他時期の活動が0日でも無限大にせず、比較期間で1日活動した相当を下限にする。
+  // 他時期の活動が0日でも無限大にせず、年度内で1日活動した相当を下限にする。
   const backgroundFloor = 1 / backgroundDays;
   const seasonalLift = seasonalRate / Math.max(backgroundRate, backgroundFloor);
   const seasonalActivityShare =
@@ -482,18 +483,22 @@ function writeDataSheet_(spreadsheet, recommendations, generatedAt) {
 }
 
 /**
- * 比較対象は「去年」の暦年。
- * その年の中で、1年前の今日を中心に±N日の活動密度を比較する。
- * 年初・年末では季節窓をその暦年内にクリップする。
+ * 比較対象は「昨年度」（4/1〜翌3/31）。
+ * その年度の中で、1年前の今日を中心に±N日の活動密度を比較する。
+ * 4月初旬 / 3月末付近では季節窓をその年度内にクリップする。
  */
 function buildWindows_(now, settings) {
   const center = shiftYears_(now, -1);
-  const comparisonYear = Number(
+  const centerYear = Number(
     Utilities.formatDate(center, REINEN_TIME_ZONE, 'yyyy')
   );
+  const centerMonth = Number(
+    Utilities.formatDate(center, REINEN_TIME_ZONE, 'M')
+  );
 
-  const comparisonStart = new Date(comparisonYear, 0, 1, 0, 0, 0, 0);
-  const comparisonEnd = new Date(comparisonYear + 1, 0, 1, 0, 0, 0, 0);
+  const fiscalYear = centerMonth >= 4 ? centerYear : centerYear - 1;
+  const comparisonStart = makeTokyoDate_(fiscalYear, 4, 1);
+  const comparisonEnd = makeTokyoDate_(fiscalYear + 1, 4, 1);
 
   const rawSeasonalStart = addDays_(center, -settings.seasonalWindowDays);
   const rawSeasonalEnd = addDays_(center, settings.seasonalWindowDays + 1);
@@ -506,12 +511,18 @@ function buildWindows_(now, settings) {
   );
 
   return {
-    comparisonYear,
+    fiscalYear,
     seasonalStart,
     seasonalEnd,
     comparisonStart,
     comparisonEnd,
   };
+}
+
+function makeTokyoDate_(year, month, day) {
+  const mm = String(month).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+  return new Date(`${year}-${mm}-${dd}T00:00:00+09:00`);
 }
 
 function describeTiming_(expectedStart, now) {
