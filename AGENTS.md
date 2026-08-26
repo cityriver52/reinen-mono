@@ -8,7 +8,7 @@
 
 - 主語は **業務ファイル**。個人の閲覧履歴を長期蓄積しない。
 - UXは **静かなPush**。recallよりprecisionを優先する。
-- 単なる昨年利用ではなく、**年間の中での季節的な偏り**を検出する。
+- 単なる昨年利用ではなく、**年度内での季節的な偏り**を検出する。
 - ユーザー入力と内部データを分離する。
 
 ## Architecture
@@ -19,6 +19,7 @@
 - Generated ledger: `Data`
 - Persistent per-file state: `State`
 - Data source: Drive Activity API v2 / `EDIT`
+- Folder hierarchy: Drive API v3
 - User resolution: People API directory search
 - Identity: Drive File ID
 - Primary UX: Google Chat weekly cards
@@ -58,24 +59,20 @@
 主要な季節性設定:
 
 - `SEASONAL_WINDOW_DAYS=21`
-- `SEASONAL_COMPARISON_DAYS=365`
 - `MIN_SEASONAL_ACTIVE_DAYS=2`
 - `MIN_SEASONAL_EDIT_ACTIVITIES=3`
 - `MIN_SEASONAL_LIFT=2`
-- `MIN_SEASONAL_ACTIVITY_SHARE=0.30`
 
 ## Detection logic
 
 1年前の今日を中心とした `±SEASONAL_WINDOW_DAYS` を季節ウィンドウとする。
 
-その周囲を含む `SEASONAL_COMPARISON_DAYS` のEDIT履歴を取得し、同じファイルについて季節ウィンドウとその他期間を比較する。
+比較対象は、その1年前の日付が属する **年度（4月1日〜翌年3月31日）**。同じファイルについて、季節ウィンドウと年度内のその他期間の活動日密度を比較する。
 
-初期値では以下を両方満たすものだけ候補化する。
+初期値では以下を満たすものだけ候補化する。
 
-- 季節ウィンドウの活動日密度が他時期の2倍以上
-- 比較期間全体の活動日の30%以上が季節ウィンドウに集中
-
-さらに季節ウィンドウで2活動日以上、またはEDIT activity 3件以上を要求する。
+- 季節ウィンドウで2活動日以上、またはEDIT activity 3件以上
+- 季節ウィンドウの活動日密度が年度内の他時期の2倍以上
 
 ```text
 base = seasonal_active_days * 100
@@ -84,11 +81,15 @@ base = seasonal_active_days * 100
 score = base * min(seasonal_lift, 5)
 ```
 
+`seasonal_lift` は季節ウィンドウの活動日率 ÷ 年度内その他期間の活動日率。
+
 **current-year / recent-90-days inactivity filter は使わない。**
+
+4月初旬・3月末付近では季節ウィンドウを比較対象年度内にクリップする。
 
 ## Folder hierarchy
 
-候補に絞った後で Drive parent hierarchy を解決する。全履歴ファイルへ階層取得を行ってAPI負荷を増やさない。
+候補に絞った後で Drive parent hierarchy をルートまで解決する。全履歴ファイルへ階層取得を行ってAPI負荷を増やさない。
 
 Chatカードにも `folder_path` を表示する。
 
@@ -119,3 +120,4 @@ Drive Activity queryではActorを直接指定できないため、folder/time/a
 8. Preserve `SPREADSHEET_ID` fallback for time-driven triggers.
 9. Prefer explainable seasonality metrics over opaque scoring.
 10. Year-round frequently used files should normally be filtered out rather than ranked highly.
+11. The comparison period is fiscal year (Apr 1–Mar 31), not calendar year or rolling 365 days.
