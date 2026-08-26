@@ -43,30 +43,18 @@ function initializeReinenViewSheet_(sheet) {
     .setFontWeight('bold')
     .setBackground('#eeeeee');
 
+  const formulas = [];
   for (let i = 0; i < REINEN_VIEW_MAX_ROWS; i += 1) {
-    const viewRow = 5 + i;
     const dataRow = 2 + i;
-
-    sheet.getRange(viewRow, 1).setFormula(
-      `=IF(Data!B${dataRow}="","",TEXT(Data!L${dataRow},"m月d日")&"ごろ")`
-    );
-    sheet.getRange(viewRow, 2).setFormula(
-      `=IF(Data!B${dataRow}="","",HYPERLINK(Data!N${dataRow},Data!B${dataRow}))`
-    );
-    sheet.getRange(viewRow, 3).setFormula(
-      `=IF(Data!B${dataRow}="","",Data!C${dataRow})`
-    );
-    sheet.getRange(viewRow, 4).setFormula(
-      `=IF(Data!B${dataRow}="","",` +
-      `"昨年"&TEXT(Data!J${dataRow},"m月d日")&"～"&TEXT(Data!K${dataRow},"m月d日")&` +
-      `"の間に"&Data!E${dataRow}&"回編集")`
-    );
-    sheet.getRange(viewRow, 5).setFormula(
-      `=IF(Data!B${dataRow}="","",` +
-      `IF(COUNTIFS(State!A:A,Data!O${dataRow},State!C:C,YEAR(TODAY()),State!D:D,TRUE)>0,"今年は不要",` +
-      `IF(SUMIFS(State!E:E,State!A:A,Data!O${dataRow},State!C:C,YEAR(TODAY()))>NOW(),"あとで","通知対象")))`
-    );
+    formulas.push([
+      `=IF(Data!B${dataRow}="","",TEXT(Data!L${dataRow},"m月d日")&"ごろ")`,
+      `=IF(Data!B${dataRow}="","",HYPERLINK(Data!N${dataRow},Data!B${dataRow}))`,
+      `=IF(Data!B${dataRow}="","",Data!C${dataRow})`,
+      `=IF(Data!B${dataRow}="","","昨年"&TEXT(Data!J${dataRow},"m月d日")&"～"&TEXT(Data!K${dataRow},"m月d日")&"の間に"&Data!E${dataRow}&"回編集")`,
+      `=IF(Data!B${dataRow}="","",IF(COUNTIFS(State!A:A,Data!O${dataRow},State!C:C,YEAR(TODAY()),State!D:D,TRUE)>0,"今年は不要",IF(SUMIFS(State!E:E,State!A:A,Data!O${dataRow},State!C:C,YEAR(TODAY()))>NOW(),"あとで","通知対象")))`,
+    ]);
   }
+  sheet.getRange(5, 1, REINEN_VIEW_MAX_ROWS, 5).setFormulas(formulas);
 
   sheet.setFrozenRows(4);
   sheet.setColumnWidth(1, 120);
@@ -77,7 +65,7 @@ function initializeReinenViewSheet_(sheet) {
   sheet.getRange(`A4:E${4 + REINEN_VIEW_MAX_ROWS}`)
     .setVerticalAlignment('middle')
     .setWrap(true);
-  sheet.getRange(`A5:E${4 + REINEN_VIEW_MAX_ROWS}`).setRowHeights(5, 52);
+  sheet.setRowHeights(5, REINEN_VIEW_MAX_ROWS, 52);
 
   const filter = sheet.getFilter();
   if (filter) filter.remove();
