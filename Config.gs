@@ -32,8 +32,11 @@ const REINEN_PROPERTY_DEFAULTS = Object.freeze({
   SNOOZE_DAYS: '14',
   MAX_OVERDUE_ALERTS_PER_RUN: '1',
   SEASONAL_WINDOW_DAYS: '21',
+  SEASONAL_COMPARISON_DAYS: '365',
   MIN_SEASONAL_ACTIVE_DAYS: '2',
   MIN_SEASONAL_EDIT_ACTIVITIES: '3',
+  MIN_SEASONAL_LIFT: '2',
+  MIN_SEASONAL_ACTIVITY_SHARE: '0.30',
   MAX_RESULTS: '50',
   PAGE_SIZE: '100',
   MAX_PAGES: '500',
@@ -183,10 +186,32 @@ function initializeConfigSheet_(sheet, preserved) {
 }
 
 function initializeDataSheet_(sheet) {
-  const headers = ['score','file_name','last_year_active_days','last_year_edit_activities','last_year_first_activity','last_year_last_activity','expected_start','timing_label','drive_url','file_id','matched_folder_ids','matched_actor_ids','generated_at'];
+  const headers = [
+    'score',
+    'file_name',
+    'folder_path',
+    'last_year_active_days',
+    'last_year_edit_activities',
+    'other_period_active_days',
+    'other_period_edit_activities',
+    'seasonal_lift',
+    'seasonal_activity_share',
+    'last_year_first_activity',
+    'last_year_last_activity',
+    'expected_start',
+    'timing_label',
+    'drive_url',
+    'file_id',
+    'matched_folder_ids',
+    'matched_actor_ids',
+    'generated_at',
+  ];
   const filter = sheet.getFilter();
   if (filter) filter.remove();
   sheet.clear();
+  if (sheet.getMaxColumns() < headers.length) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), headers.length - sheet.getMaxColumns());
+  }
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#eeeeee');
   sheet.setFrozenRows(1);
@@ -330,7 +355,10 @@ function requireConfigSheet_(ss) {
   return sheet;
 }
 
-function getOrCreateSheet_(ss, name) { return ss.getSheetByName(name) || ss.insertSheet(name); }
+function getOrCreateSheet_(ss, name) {
+  return ss.getSheetByName(name) || ss.insertSheet(name);
+}
+
 function extractFolderId_(value) {
   const text = String(value || '').trim();
   if (!text) throw new Error('フォルダURLまたはIDが空です。');
@@ -340,7 +368,11 @@ function extractFolderId_(value) {
   if (/^[A-Za-z0-9_-]{10,}$/.test(text)) return text;
   throw new Error('Google DriveフォルダのURLまたはIDとして読み取れません。');
 }
-function normalizeEmail_(value) { return String(value || '').trim().toLowerCase(); }
+
+function normalizeEmail_(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function uniqueBy_(items, keyFn) {
   const seen = new Set();
   return items.filter((item) => {
