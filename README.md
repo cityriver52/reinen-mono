@@ -1,120 +1,147 @@
 # Re:年モノ
 
-**「去年の今ごろ動いていた仕事」を、今年もそろそろ思い出させるためのツールです。**
+**「去年の今ごろ特に動いていた仕事」を、今年もそろそろ思い出させるためのツールです。**
 
 正式表記: **Re:年モノ**  
 読み: **レイネンモノ**  
 Repository: `reinen-mono`
 
-## 構成
+## 現在の構成
 
-Google Sheets のコンテナバインド Apps Script として動かします。
+Google Sheets のコンテナバインド Apps Script として動作します。
 
 ```text
 Re:年モノ スプレッドシート
-├─ Config  ← ユーザー入力はフォルダURLとメールアドレスだけ
-├─ Data    ← 毎回再生成する検出結果（内部データ）
-└─ State   ← 今年は不要 / スヌーズ / 期限超過通知済みの状態
+├─ Config   対象フォルダ / 対象ユーザー
+├─ Data     毎回再生成する集計結果
+└─ State    今年は不要 / スヌーズ / 通知済み状態
         │
-        └─ 必要なものだけ Google Chat へPush
+        └─ 必要な候補だけ Google Chat へPush
 ```
 
-## Config
+## 検出の考え方
 
-ユーザーが入力するのは黄色のセルだけです。
+単に「去年の今ごろ使われていたファイル」ではなく、**去年の他の時期と比べて今ごろ特に使われていたファイル**を抽出します。
 
-### 対象フォルダ
+初期設定では:
 
-- `フォルダURL / ID（入力）`
-- `表示名（自動）`
-- `Folder ID（自動）`
-- `状態（自動）`
+- 1年前の今日を中心に ±21日（43日間）を「今ごろ」とする
+- その周囲を含む365日間を比較期間とする
+- 今ごろの活動日密度が他時期の **2倍以上**
+- 365日間の全活動日のうち **30%以上** が今ごろに集中
+- 今ごろに2日以上活動、または EDIT activity 3件以上
 
-空欄行は対象外です。複数行にURLを入れれば複数フォルダを対象にできます。
+これにより、年中毎月使われる常設ファイルを除外しやすくします。
 
-### 対象ユーザー
+### スコア
 
-- `メールアドレス（入力）`
-- `表示名（自動）`
-- `Actor ID（自動）`
-- `状態（自動）`
+```text
+base = 今ごろの活動日数 × 100
+     + min(今ごろのEDIT activity, 50) × 5
 
-空欄行は対象外です。複数行にメールアドレスを入れれば複数ユーザーを対象にできます。
+score = base × min(季節性倍率, 5)
+```
 
-入力後に `Re:年モノ > Configを更新` を実行すると自動列が更新されます。
-
-## Data
-
-主UIではなく内部台帳です。タイトルやキャッチコピーは置かず、1行目から機械処理向けのヘッダーで始まります。
-
-毎回 `runReinenMono()` / `runWeeklyReinenDigest()` で再生成します。
-
-## State
-
-ファイルごとの動的状態を表で保持します。
-
-- `skip_this_year`: 「今年は不要」
-- `snooze_until`: 「あとで」
-- `overdue_sent_at`: 期限超過通知を送信済みか
-
-これらは Script Properties には保存しません。
+季節性倍率は、今ごろの「1日あたり活動率」を他時期の活動率と比較したものです。
 
 ## Script Properties
 
-`setupReinenMonoWorkbook()` の初回実行で必要なキーをすべて作成します。以後のメンテナンスは **Apps Script > プロジェクトの設定 > スクリプト プロパティ** から直接値を書き換えます。
+初回 `setupReinenMonoWorkbook()` で必要なプロパティを作成します。以後は Apps Script のプロジェクト設定から直接変更します。
 
-主なキー:
+主な季節性設定:
 
-- `SPREADSHEET_ID`
+- `SEASONAL_WINDOW_DAYS` = `21`
+- `SEASONAL_COMPARISON_DAYS` = `365`
+- `MIN_SEASONAL_ACTIVE_DAYS` = `2`
+- `MIN_SEASONAL_EDIT_ACTIVITIES` = `3`
+- `MIN_SEASONAL_LIFT` = `2`
+- `MIN_SEASONAL_ACTIVITY_SHARE` = `0.30`
+
+通知設定:
+
 - `CHAT_WEBHOOK_URL`
 - `WEB_APP_URL`
-- `ACTION_SECRET`
-- `WEEKLY_DAY` / `WEEKLY_HOUR`
-- `UPCOMING_DAYS` / `WEEKLY_MAX_ITEMS`
-- `SNOOZE_DAYS` / `MAX_OVERDUE_ALERTS_PER_RUN`
-- `SEASONAL_WINDOW_DAYS`
-- `MIN_SEASONAL_ACTIVE_DAYS`
-- `MIN_SEASONAL_EDIT_ACTIVITIES`
-- `MAX_RESULTS` / `PAGE_SIZE` / `MAX_PAGES`
+- `WEEKLY_DAY`
+- `WEEKLY_HOUR`
+- `UPCOMING_DAYS`
+- `WEEKLY_MAX_ITEMS`
+- `SNOOZE_DAYS`
 
-## 検出ロジック
+新しいプロパティを追加したリリースへ更新した場合は、`setupReinenMonoWorkbook()` を再実行すると不足キーだけ補完されます。既存値は上書きしません。
 
-実行日を基準に昨年の同日を中心とした期間だけを見ます。
+## Config
 
-デフォルト:
+ユーザーが入力するのは黄色セルだけです。
 
-- 昨年同時期: ±21日
-- 2日以上にわたり EDIT activity が存在、または EDIT activity が3件以上
-- Configで指定したフォルダ配下だけ
-- Configで指定したユーザーのactivityだけ
+- 対象フォルダ: Google Drive フォルダURL / ID
+- 対象ユーザー: メールアドレス
 
-**直近90日の稼働有無は判定条件に含めません。**
+表示名、Folder ID、Actor ID、状態は自動取得します。
 
-スコア:
+## Data
 
-```text
-score = 昨年の活動日数 × 100
-      + min(昨年のEDIT activity件数, 50) × 5
-```
+内部集計用シートです。タイトルや説明文は置きません。
+
+主な列:
+
+- `score`
+- `file_name`
+- `folder_path` — ファイル直上だけでなくDriveルートからの階層
+- `last_year_active_days`
+- `last_year_edit_activities`
+- `other_period_active_days`
+- `other_period_edit_activities`
+- `seasonal_lift`
+- `seasonal_activity_share`
+- `last_year_first_activity`
+- `last_year_last_activity`
+- `expected_start`
+- `drive_url`
+- `file_id`
+
+## State
+
+動的な状態は Script Properties ではなく表管理します。
+
+- `skip_this_year`
+- `snooze_until`
+- `overdue_sent_at`
+
+## Google Chat
+
+通常は週1回・最大3件だけ通知します。
+
+カードにはファイル名に加えて **Driveのフォルダ階層** と季節性倍率を表示します。
+
+操作:
+
+- `開く`
+- `今年は不要`
+- `あとで`
+- `集計スプシを見る`
+
+Google Chatへの投稿はトップレベルの本文テキストを付けず、カードのみ送信します。
+
+開始時期を過ぎた通知では、`去年なら、もう始まっていました` という見出しは使わず、
+
+> 昨年の開始時期から約7日経っています。
+
+のように簡潔に表示します。
 
 ## セットアップ
 
 1. 管理用Googleスプレッドシートを開く
-2. **拡張機能 → Apps Script** でコンテナバインドプロジェクトを開く
+2. **拡張機能 → Apps Script**
 3. このリポジトリの `.gs` と `appsscript.json` を配置
-4. Drive Activity API と People API を有効化
-5. `setupReinenMonoWorkbook()` を1回実行
-6. Configの黄色セルにフォルダURL・ユーザーメールを入力
-7. `refreshReinenConfig()` を実行
-8. 必要に応じて Script Properties を編集
-9. `diagnoseHistory()` / `runReinenMono()` で確認
-
-Google Chatを使う場合は `CHAT_WEBHOOK_URL` と、フィードバックボタンを使う場合は `WEB_APP_URL` を Script Properties に設定します。
-
-週次トリガーは `WEEKLY_DAY` / `WEEKLY_HOUR` を編集後、`setupWeeklyReinenTrigger()` を実行します。
+4. Drive Activity API / People API を有効化
+5. `setupReinenMonoWorkbook()`
+6. ConfigへフォルダURLとメールアドレスを入力
+7. `refreshReinenConfig()`
+8. `diagnoseHistory()`
+9. `runReinenMono()`
 
 ## Product principle
 
-**ユーザーに一覧を解読させない。通知しすぎない。設定箇所を増やしすぎない。**
+**年次的な「偏り」を見つける。年中使う普通のファイルは静かに除外する。**
 
-人事異動がある組織でも使えるよう、個人の長期閲覧ログではなく、業務ファイルの過去activityを主語にします。
+Re:年モノでは、取りこぼしをゼロにすることより、ユーザーが「そうそう、これだ」と思える通知の精度を優先します。
