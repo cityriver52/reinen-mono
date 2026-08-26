@@ -11,6 +11,7 @@
 - 単なる昨年利用ではなく、**年度内での季節的な偏り**を検出する。
 - ユーザー入力と内部データを分離する。
 - 日常運用でApps Scriptのソースファイルを開かせない。**Config + カスタムメニュー**を操作面とする。
+- 配布先ごとに変わる値は、Project SettingsではなくConfigで編集できるようにする。
 
 ## Architecture
 
@@ -29,14 +30,27 @@
 
 ### Config
 
+利用者が編集する設定面。
+
+#### 通知設定
+
+配布先ごとに変わる次の値をConfigへ置く。
+
+- Web App URL
+- Google Chat Incoming Webhook URL
+- Weekly weekday
+- Weekly hour band
+
+これらをScript Propertiesへ戻さない。Configをsource of truthとし、時間主導トリガー実行時もスプレッドシートから読み直す。
+
+#### 対象範囲
+
 ユーザーが入力するのは次だけ。
 
 - Drive folder URL / ID
 - User email address
 
 表示名、Folder ID、Actor ID、状態は自動解決する。チェックボックスや all-users toggle は再導入しない。
-
-入力後はカスタムメニュー `Re:年モノ > セットアップ > ① Configを検証・反映` を実行する。
 
 ### Data
 
@@ -55,36 +69,69 @@
 
 これらを Script Properties に戻さない。
 
-## Menu-driven operation
+## Distribution setup flow
+
+配布先の利用者が行う標準手順は次の順番。
+
+1. Spreadsheetを開く
+2. Web Appをdeploy
+3. Google Chat spaceでIncoming Webhookを作成
+4. ConfigへWeb App URL / Webhook URLを入力
+5. `Re:年モノ > セットアップ > ① Chat接続テスト`
+6. Folder URL / User emailを入力
+7. `② 対象範囲を検証・反映`
+8. `③ 実データ通知テスト`（`runWeeklyReinenDigest()`）
+9. Configの曜日・時間帯を確認
+10. `④ 週次トリガーを設定`
 
 Apps Script editorから関数を直接Runすることを通常手順にしない。
 
-カスタムメニューは少なくとも以下を提供する。
+Config反映・各メニュー操作時に、`SPREADSHEET_ID`、不足している内部Script Properties、`Data` / `State` の最低限の構造を補完する。
 
-- 初期セットアップ / 再構築
-- ① Configを検証・反映
-- 履歴診断（結果概要はSheet上のdialogで表示）
-- ② 集計を更新
-- ③ Chatテスト通知
-- ④ 週次通知を今すぐ実行
-- ⑤ 週次トリガーを設定
+## Custom menu
 
-Config反映時に、`SPREADSHEET_ID`、不足しているScript Properties、`Data` / `State` の最低限の構造を補完する。新しいリリース導入のたびにユーザーへ「エディタでsetup関数をRunしてください」と要求しない。
+### セットアップ
 
-初回のメニュー操作時にGoogleのauthorization flowが表示されることは許容する。
+- ① Chat接続テスト
+- ② 対象範囲を検証・反映
+- ③ 実データ通知テスト
+- ④ 週次トリガーを設定
+
+### 運用
+
+- 集計を更新
+- 週次通知を今すぐ実行
+- 履歴診断
+- Configを再構築
 
 ## Script Properties
 
-静的運用設定のみ。不足キーは初回セットアップまたはConfig反映時に自動作成する。既存値は勝手に上書きしない。
+**内部設定のみ**。配布先の利用者が通常編集する場所ではない。
 
-主要な季節性設定:
+主なもの:
 
-- `SEASONAL_WINDOW_DAYS=21`
-- `MIN_SEASONAL_ACTIVE_DAYS=2`
-- `MIN_SEASONAL_EDIT_ACTIVITIES=3`
-- `MIN_SEASONAL_LIFT=2`
+- `SPREADSHEET_ID`
+- `ACTION_SECRET`
+- `UPCOMING_DAYS`
+- `WEEKLY_MAX_ITEMS`
+- `SNOOZE_DAYS`
+- `MAX_OVERDUE_ALERTS_PER_RUN`
+- `SEASONAL_WINDOW_DAYS`
+- `MIN_SEASONAL_ACTIVE_DAYS`
+- `MIN_SEASONAL_EDIT_ACTIVITIES`
+- `MIN_SEASONAL_LIFT`
+- `MAX_RESULTS`
+- `PAGE_SIZE`
+- `MAX_PAGES`
 
-Webhook URLやsecretはSheetのセルへ平文保存せず、Script Propertiesに保持する。
+次はScript Propertiesへ置かない:
+
+- `CHAT_WEBHOOK_URL`
+- `WEB_APP_URL`
+- `WEEKLY_DAY`
+- `WEEKLY_HOUR`
+
+`ACTION_SECRET`はConfigへ出さず内部生成する。
 
 ## Detection logic
 
@@ -127,7 +174,6 @@ Drive Activity queryではActorを直接指定できないため、folder/time/a
 - Incoming Webhookを使用
 - payloadは `cardsV2` のみ。トップレベル `text` は付けない
 - 一覧ボタン文言は **`集計スプシを見る`**
-- overdueカードで `去年なら、もう始まっていました` は使わない
 - overdue headerは `昨年の開始時期から約N日経っています。`
 - `今年は不要` / `あとで` はWeb App経由で `State` へ保存
 
@@ -139,9 +185,10 @@ Drive Activity queryではActorを直接指定できないため、folder/time/a
 4. Do not add LLM/AI without a concrete need.
 5. Do not assert a guaranteed Drive Activity retention period.
 6. Do not store file contents unnecessarily.
-7. Webhook URLs and secrets stay in Script Properties.
-8. Preserve `SPREADSHEET_ID` fallback for time-driven triggers.
-9. Prefer explainable seasonality metrics over opaque scoring.
-10. Year-round frequently used files should normally be filtered out rather than ranked highly.
-11. The comparison period is fiscal year (Apr 1–Mar 31), not calendar year or rolling 365 days.
-12. Do not make editor-based function execution part of normal user operations.
+7. Webhook URL / Web App URL / weekly schedule are Config-managed distribution settings.
+8. `ACTION_SECRET` remains internal and must not be exposed in Config.
+9. Preserve `SPREADSHEET_ID` fallback for time-driven triggers.
+10. Prefer explainable seasonality metrics over opaque scoring.
+11. Year-round frequently used files should normally be filtered out rather than ranked highly.
+12. The comparison period is fiscal year (Apr 1–Mar 31), not calendar year or rolling 365 days.
+13. Do not make editor-based function execution part of normal user operations.
