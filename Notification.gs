@@ -1,15 +1,11 @@
 /**
  * RE:年モノ - Push UX
  *
- * 方針:
  * - 普段は静かにする
  * - 週1回、開始時期が近いものを最大3件だけ Google Chat に通知
  * - 昨年の開始時期を過ぎたものは、1件につき今年1回だけ強めに通知
- * - 今年すでに編集されたファイルは Code.gs 側の推薦条件から自動的に消える
+ * - 今年すでに編集されたファイルは推薦条件から自動的に消える
  * - 「今年は不要」「あとで」で通知を抑制できる
- *
- * Google Chat への送信は Incoming Webhook を使う。
- * フィードバック操作は Apps Script Web App の doGet() で受ける。
  */
 
 const REINEN_UX_CONFIG = Object.freeze({
@@ -24,19 +20,14 @@ const REINEN_UX_CONFIG = Object.freeze({
   PROP_ACTION_SECRET: 'ACTION_SECRET',
 });
 
-/**
- * Google Chat の Incoming Webhook URL を保存する。
- */
 function configureChatWebhook(webhookUrl) {
   if (!webhookUrl || typeof webhookUrl !== 'string') {
     throw new Error('Google Chat の Incoming Webhook URL を指定してください。');
   }
-
   const value = webhookUrl.trim();
   if (!/^https:\/\/chat\.googleapis\.com\//.test(value)) {
     throw new Error('Google Chat の Incoming Webhook URL ではないようです。');
   }
-
   PropertiesService.getScriptProperties().setProperty(
     REINEN_UX_CONFIG.PROP_CHAT_WEBHOOK,
     value
@@ -44,15 +35,10 @@ function configureChatWebhook(webhookUrl) {
   return 'Google Chat webhook を保存しました。';
 }
 
-/**
- * Web App をデプロイした後、デプロイURLを明示保存したい場合に使う。
- * ScriptApp.getService().getUrl() が取得できる場合は設定不要。
- */
 function configureReinenWebAppUrl(webAppUrl) {
   if (!webAppUrl || !/^https:\/\/script\.google\.com\//.test(webAppUrl.trim())) {
     throw new Error('Apps Script Web App のURLを指定してください。');
   }
-
   PropertiesService.getScriptProperties().setProperty(
     REINEN_UX_CONFIG.PROP_WEB_APP_URL,
     webAppUrl.trim()
@@ -61,10 +47,6 @@ function configureReinenWebAppUrl(webAppUrl) {
   return 'Web App URL を保存しました。';
 }
 
-/**
- * 毎週の通知トリガーを作成する。
- * Apps Script の時間主導トリガーなので、指定時刻ちょうどではなく概ねその時間帯に動く。
- */
 function setupWeeklyReinenTrigger(weekday, hour) {
   const dayName = String(weekday || REINEN_UX_CONFIG.DEFAULT_WEEKDAY).toUpperCase();
   const targetHour = Number.isInteger(hour) ? hour : REINEN_UX_CONFIG.DEFAULT_HOUR;
@@ -89,20 +71,14 @@ function setupWeeklyReinenTrigger(weekday, hour) {
   return `${dayName} ${targetHour}:00ごろの週次トリガーを設定しました。`;
 }
 
-/**
- * Push UX の本体。
- * スプレッドシートは裏側の台帳として毎回更新し、ユーザーには必要なものだけ通知する。
- */
 function runWeeklyReinenDigest() {
-  validateConfiguration_();
-
   const snapshot = buildReinenSnapshotForUx_();
   const spreadsheet = getOrCreateOutputSpreadsheet_();
   writeRecommendations_(
     spreadsheet,
     snapshot.recommendations,
     snapshot.windows,
-    snapshot.sourceFolderId
+    snapshot.runtime
   );
 
   const now = snapshot.now;
@@ -152,7 +128,7 @@ function runWeeklyReinenDigest() {
 
   if (!getChatWebhook_()) {
     console.log(
-      'CHAT_WEBHOOK_URL が未設定のため通知は送りません。スプレッドシートだけ更新しました。'
+      'CHAT_WEBHOOK_URL が未設定のため通知は送りません。おすすめシートだけ更新しました。'
     );
     return result;
   }
@@ -171,9 +147,6 @@ function runWeeklyReinenDigest() {
   return result;
 }
 
-/**
- * Webhook疎通確認。実ファイルは通知しない。
- */
 function sendTestReinenNotification() {
   const payload = {
     text: 'RE:年モノ テスト通知',
@@ -205,9 +178,6 @@ function sendTestReinenNotification() {
   return 'テスト通知を送信しました。';
 }
 
-/**
- * Chatカードの「今年は不要」「あとで」から呼ばれるWeb Appエンドポイント。
- */
 function doGet(e) {
   const params = (e && e.parameter) || {};
   const action = params.action || '';
@@ -218,7 +188,6 @@ function doGet(e) {
   if (!['skip', 'snooze'].includes(action) || !fileId || !year || !signature) {
     return renderActionResult_('操作を確認できませんでした。', false);
   }
-
   if (!verifyActionSignature_(action, fileId, year, signature)) {
     return renderActionResult_('このリンクは無効か、期限切れです。', false);
   }
@@ -244,16 +213,16 @@ function doGet(e) {
 
 function buildReinenSnapshotForUx_() {
   const now = new Date();
-  const sourceFolderId = getSourceFolderId_();
+  const runtime = readReinenRuntimeConfig_();
   const windows = buildWindows_(now);
 
-  const seasonalStats = queryEditStats_(
-    sourceFolderId,
+  const seasonalStats = queryEditStatsForRuntime_(
+    runtime,
     windows.seasonalStart,
     windows.seasonalEnd
   );
-  const recentStats = queryEditStats_(
-    sourceFolderId,
+  const recentStats = queryEditStatsForRuntime_(
+    runtime,
     windows.recentStart,
     windows.recentEnd
   );
@@ -262,7 +231,7 @@ function buildReinenSnapshotForUx_() {
     .sort((a, b) => b.score - a.score)
     .slice(0, REINEN_CONFIG.MAX_RESULTS);
 
-  return { now, sourceFolderId, windows, recommendations };
+  return { now, runtime, windows, recommendations };
 }
 
 function buildWeeklyDigestCard_(items, spreadsheetUrl, year) {
@@ -284,13 +253,7 @@ function buildWeeklyDigestCard_(items, spreadsheetUrl, year) {
         wrapText: true,
       },
     });
-
-    widgets.push({
-      buttonList: {
-        buttons: buildItemButtons_(item, year),
-      },
-    });
-
+    widgets.push({ buttonList: { buttons: buildItemButtons_(item, year) } });
     widgets.push({ divider: {} });
   });
 
@@ -376,17 +339,13 @@ function buildItemButtons_(item, year) {
   buttons.push({
     text: '今年は不要',
     onClick: {
-      openLink: {
-        url: buildActionUrl_('skip', item.fileId, year),
-      },
+      openLink: { url: buildActionUrl_('skip', item.fileId, year) },
     },
   });
   buttons.push({
     text: 'あとで',
     onClick: {
-      openLink: {
-        url: buildActionUrl_('snooze', item.fileId, year),
-      },
+      openLink: { url: buildActionUrl_('snooze', item.fileId, year) },
     },
   });
 
@@ -412,7 +371,6 @@ function sendChatPayload_(payload) {
       `Google Chat への送信に失敗しました (${status}): ${response.getContentText()}`
     );
   }
-
   return response.getContentText();
 }
 
@@ -444,7 +402,6 @@ function isUxSuppressed_(fileId, year, now) {
     properties.deleteProperty(snoozeKey_(fileId));
     return false;
   }
-
   return true;
 }
 
