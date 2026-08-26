@@ -87,7 +87,21 @@ score = base × min(seasonal_lift, 5)
 
 ### Config
 
-ユーザー入力はフォルダURL / IDとメールアドレスだけ。その他は自動解決する。
+配布先利用者の設定面。黄色セルのみ編集する。
+
+通知設定:
+
+- WebアプリURL
+- Chat Webhook URL
+- 週次通知曜日
+- 通知時間帯
+
+対象範囲:
+
+- フォルダURL / ID
+- ユーザーメールアドレス
+
+Folder ID、Actor ID、表示名、状態は自動解決する。
 
 ### Data
 
@@ -110,7 +124,40 @@ score = base × min(seasonal_lift, 5)
 
 ### Script Properties
 
-Webhook URL、Web App URL、トリガー時刻、季節性閾値などの静的運用設定だけを持つ。
+配布先ごとに書き換える値は置かない。
+
+内部設定のみを保持する。
+
+- `SPREADSHEET_ID`
+- `ACTION_SECRET`
+- 検出閾値
+- 通知件数 / スヌーズ日数などの内部デフォルト
+
+Web App URL、Webhook URL、曜日、時間帯はConfigをsource of truthとする。
+
+## 配布セットアップ
+
+```text
+Spreadsheetを開く
+  ↓
+Web Appをdeploy
+  ↓
+Chat Incoming Webhookを作成
+  ↓
+Configへ2つのURLを入力
+  ↓
+① Chat接続テスト
+  ↓
+Folder / Userを入力
+  ↓
+② 対象範囲を検証・反映
+  ↓
+③ 実データ通知テスト
+  ↓
+④ 週次トリガーを設定
+```
+
+日常手順ではApps Script editorから関数を直接Runしない。
 
 ## Push UX
 
