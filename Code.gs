@@ -3,8 +3,16 @@
  *
  * Configで指定した複数フォルダ / 複数ユーザーについて、
  * 「昨年の今頃が、昨年度の他時期より特に活発だった」ファイルを評価する。
+ *
+ * Performance strategy:
+ * 1. まず季節ウィンドウ（通常43日）だけをフォルダ配下で検索する。
+ * 2. その期間で最低活動量を満たしたファイルだけ、年度内のその他期間をitemNameで照会する。
+ * 3. itemName照会は UrlFetchApp.fetchAll() で並列化する。
+ *
+ * 年度全体を対象フォルダ配下で総なめしないことが重要。
  */
 const REINEN_TIME_ZONE = 'Asia/Tokyo';
+const REINEN_DRIVE_ACTIVITY_ENDPOINT = 'https://driveactivity.googleapis.com/v2/activity:query';
 
 function getReinenCoreSettings_() {
   const props = PropertiesService.getScriptProperties();
@@ -16,10 +24,12 @@ function getReinenCoreSettings_() {
     maxResults: getIntProperty_(props, 'MAX_RESULTS', 50),
     pageSize: getIntProperty_(props, 'PAGE_SIZE', 100),
     maxPages: getIntProperty_(props, 'MAX_PAGES', 500),
+    backgroundParallelBatchSize: 20,
   };
 }
 
 function runReinenMono() {
+  const startedAt = Date.now();
   const runtime = readReinenRuntimeConfig_();
   const settings = getReinenCoreSettings_();
   const now = new Date();
@@ -39,12 +49,14 @@ function runReinenMono() {
     comparisonFiscalYear: windows.fiscalYear,
     folders: runtime.folders.length,
     users: runtime.users.length,
+    elapsedSeconds: Math.round((Date.now() - startedAt) / 100) / 10,
   };
   console.log(JSON.stringify(result, null, 2));
   return result;
 }
 
 function diagnoseHistory() {
+  const startedAt = Date.now();
   const runtime = readReinenRuntimeConfig_();
   const settings = getReinenCoreSettings_();
   const now = new Date();
@@ -61,6 +73,7 @@ function diagnoseHistory() {
     seasonalStart: windows.seasonalStart.toISOString(),
     seasonalEndExclusive: windows.seasonalEnd.toISOString(),
     filesFound: values.length,
+    elapsedSeconds: Math.round((Date.now() - startedAt) / 100) / 10,
     top20: values
       .filter((x) => x.seasonalActiveDays > 0)
       .sort((a, b) =>
@@ -74,27 +87,77 @@ function diagnoseHistory() {
 }
 
 /**
- * 昨年度（4/1〜翌3/31）を一度取得し、その中で「今頃」と「その他」を分けて集計する。
+ * Two-stage query.
+ *
+ * 旧方式:
+ *   フォルダ配下の昨年度1年分を全取得 → 今頃 / その他へ分割
+ *
+ * 新方式:
+ *   A. フォルダ配下の今頃だけ取得
+ *   B. Aで最低活動量を満たすファイルだけ、年度内その他をitemNameで取得
+ *
+ * 年中大量に動くフォルダほど削減効果が大きい。
  */
 function querySeasonalityStatsForConfig_(runtime, windows, settings) {
+  const startedAt = Date.now();
   const stats = {};
-  const seenEvents = new Set();
+  const seenSeasonalEvents = new Set();
 
   runtime.folders.forEach((folder) => {
-    querySeasonalityStats_(
+    querySeasonalWindowForFolder_(
       folder,
       windows,
       runtime.allowedActorIds,
       settings,
       stats,
-      seenEvents
+      seenSeasonalEvents
     );
+  });
+
+  const candidates = Object.values(stats).filter((stat) => {
+    const activeDays = stat.seasonalActiveDaySet
+      ? stat.seasonalActiveDaySet.size
+      : 0;
+    return (
+      activeDays >= settings.minSeasonalActiveDays ||
+      stat.seasonalEditActivities >= settings.minSeasonalEditActivities
+    );
+  });
+
+  console.log(
+    `[Re:年モノ] seasonal scan: ${Object.keys(stats).length} files, ` +
+    `${candidates.length} background candidates, ` +
+    `${Math.round((Date.now() - startedAt) / 100) / 10}s`
+  );
+
+  if (candidates.length > 0) {
+    queryBackgroundForCandidatesInParallel_(
+      candidates,
+      windows,
+      runtime.allowedActorIds,
+      settings
+    );
+  }
+
+  console.log(
+    `[Re:年モノ] seasonality query total: ` +
+    `${Math.round((Date.now() - startedAt) / 100) / 10}s`
+  );
+
+  // 季節窓に現れたが最低活動量を満たさなかったファイルは、
+  // 年度背景を取得していないのでここで除外して返す。
+  const candidateIds = new Set(candidates.map((stat) => stat.fileId));
+  Object.keys(stats).forEach((fileId) => {
+    if (!candidateIds.has(fileId)) delete stats[fileId];
   });
 
   return stats;
 }
 
-function querySeasonalityStats_(
+/**
+ * Phase A: 通常43日程度の季節ウィンドウだけをフォルダ配下で検索する。
+ */
+function querySeasonalWindowForFolder_(
   folder,
   windows,
   allowedActorIds,
@@ -120,8 +183,8 @@ function querySeasonalityStats_(
       pageSize: settings.pageSize,
       filter:
         'detail.action_detail_case:EDIT ' +
-        `time >= "${windows.comparisonStart.toISOString()}" ` +
-        `time < "${windows.comparisonEnd.toISOString()}"`,
+        `time >= \"${windows.seasonalStart.toISOString()}\" ` +
+        `time < \"${windows.seasonalEnd.toISOString()}\"`,
     };
     if (pageToken) request.pageToken = pageToken;
 
@@ -139,9 +202,6 @@ function querySeasonalityStats_(
         REINEN_TIME_ZONE,
         'yyyy-MM-dd'
       );
-      const isSeasonal =
-        activityTime >= windows.seasonalStart &&
-        activityTime < windows.seasonalEnd;
 
       const seenFileIds = new Set();
       for (const target of activity.targets || []) {
@@ -165,50 +225,224 @@ function querySeasonalityStats_(
         seenEvents.add(eventKey);
 
         if (!stats[fileId]) {
-          stats[fileId] = {
+          stats[fileId] = createEmptySeasonalityStat_(
             fileId,
-            title: item.title || '(無題)',
-            totalEditActivities: 0,
-            totalActiveDaySet: new Set(),
-            seasonalEditActivities: 0,
-            seasonalActiveDaySet: new Set(),
-            actorIdSet: new Set(),
-            folderIdSet: new Set(),
-            seasonalFirstActivity: null,
-            seasonalLastActivity: null,
-          };
+            item.title || '(無題)'
+          );
         }
 
         const stat = stats[fileId];
         stat.totalEditActivities += 1;
         stat.totalActiveDaySet.add(dayKey);
+        stat.seasonalEditActivities += 1;
+        stat.seasonalActiveDaySet.add(dayKey);
         stat.folderIdSet.add(folder.id);
         actorIds.forEach((id) => {
           if (allowedActorIds.has(id)) stat.actorIdSet.add(id);
         });
         if (item.title) stat.title = item.title;
 
-        if (isSeasonal) {
-          stat.seasonalEditActivities += 1;
-          stat.seasonalActiveDaySet.add(dayKey);
-          if (
-            !stat.seasonalFirstActivity ||
-            activityTime < stat.seasonalFirstActivity
-          ) {
-            stat.seasonalFirstActivity = activityTime;
-          }
-          if (
-            !stat.seasonalLastActivity ||
-            activityTime > stat.seasonalLastActivity
-          ) {
-            stat.seasonalLastActivity = activityTime;
-          }
+        if (
+          !stat.seasonalFirstActivity ||
+          activityTime < stat.seasonalFirstActivity
+        ) {
+          stat.seasonalFirstActivity = activityTime;
+        }
+        if (
+          !stat.seasonalLastActivity ||
+          activityTime > stat.seasonalLastActivity
+        ) {
+          stat.seasonalLastActivity = activityTime;
         }
       }
     }
 
     pageToken = response.nextPageToken || null;
   } while (pageToken);
+}
+
+function createEmptySeasonalityStat_(fileId, title) {
+  return {
+    fileId,
+    title: title || '(無題)',
+    totalEditActivities: 0,
+    totalActiveDaySet: new Set(),
+    seasonalEditActivities: 0,
+    seasonalActiveDaySet: new Set(),
+    actorIdSet: new Set(),
+    folderIdSet: new Set(),
+    seasonalFirstActivity: null,
+    seasonalLastActivity: null,
+    backgroundSeenEventSet: new Set(),
+  };
+}
+
+/**
+ * Phase B: 季節候補だけについて、年度内の季節窓以外をitemNameで照会する。
+ * 各ファイルの照会は独立しているため fetchAll() で並列化する。
+ */
+function queryBackgroundForCandidatesInParallel_(
+  candidates,
+  windows,
+  allowedActorIds,
+  settings
+) {
+  const jobs = [];
+
+  candidates.forEach((stat) => {
+    if (windows.comparisonStart < windows.seasonalStart) {
+      jobs.push(createBackgroundQueryJob_(
+        stat,
+        windows.comparisonStart,
+        windows.seasonalStart
+      ));
+    }
+    if (windows.seasonalEnd < windows.comparisonEnd) {
+      jobs.push(createBackgroundQueryJob_(
+        stat,
+        windows.seasonalEnd,
+        windows.comparisonEnd
+      ));
+    }
+  });
+
+  const token = ScriptApp.getOAuthToken();
+  const batchSize = Math.max(
+    1,
+    Math.min(settings.backgroundParallelBatchSize || 20, 50)
+  );
+  let pending = jobs;
+
+  while (pending.length > 0) {
+    const nextPending = [];
+
+    for (let offset = 0; offset < pending.length; offset += batchSize) {
+      const batch = pending.slice(offset, offset + batchSize);
+      const requests = batch.map((job) =>
+        buildBackgroundFetchRequest_(job, token, settings)
+      );
+      const responses = UrlFetchApp.fetchAll(requests);
+
+      responses.forEach((response, index) => {
+        const job = batch[index];
+        const status = response.getResponseCode();
+        if (status < 200 || status >= 300) {
+          throw new Error(
+            `Drive Activity API の候補別照会に失敗しました (${status}): ` +
+            response.getContentText().slice(0, 500)
+          );
+        }
+
+        let body;
+        try {
+          body = JSON.parse(response.getContentText() || '{}');
+        } catch (error) {
+          throw new Error('Drive Activity API の応答JSONを解析できませんでした。');
+        }
+
+        processBackgroundActivities_(
+          job.stat,
+          body.activities || [],
+          allowedActorIds
+        );
+
+        job.pages += 1;
+        if (job.pages > settings.maxPages) {
+          throw new Error(
+            `${job.stat.title}: Drive Activity API のページ数が ` +
+            `${settings.maxPages} を超えました。`
+          );
+        }
+
+        if (body.nextPageToken) {
+          job.pageToken = body.nextPageToken;
+          nextPending.push(job);
+        }
+      });
+    }
+
+    pending = nextPending;
+  }
+
+  candidates.forEach((stat) => {
+    delete stat.backgroundSeenEventSet;
+  });
+}
+
+function createBackgroundQueryJob_(stat, start, end) {
+  return {
+    stat,
+    start,
+    end,
+    pageToken: '',
+    pages: 0,
+  };
+}
+
+function buildBackgroundFetchRequest_(job, token, settings) {
+  const body = {
+    itemName: `items/${job.stat.fileId}`,
+    consolidationStrategy: { none: {} },
+    pageSize: settings.pageSize,
+    filter:
+      'detail.action_detail_case:EDIT ' +
+      `time >= \"${job.start.toISOString()}\" ` +
+      `time < \"${job.end.toISOString()}\"`,
+  };
+  if (job.pageToken) body.pageToken = job.pageToken;
+
+  return {
+    url: REINEN_DRIVE_ACTIVITY_ENDPOINT,
+    method: 'post',
+    contentType: 'application/json; charset=UTF-8',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    payload: JSON.stringify(body),
+    muteHttpExceptions: true,
+  };
+}
+
+function processBackgroundActivities_(stat, activities, allowedActorIds) {
+  for (const activity of activities) {
+    const activityTime = getActivityTime_(activity);
+    if (!activityTime) continue;
+
+    const actorIds = getActivityActorIds_(activity);
+    if (!actorIds.some((id) => allowedActorIds.has(id))) continue;
+
+    const dayKey = Utilities.formatDate(
+      activityTime,
+      REINEN_TIME_ZONE,
+      'yyyy-MM-dd'
+    );
+
+    let targetsFile = false;
+    for (const target of activity.targets || []) {
+      const item = target.driveItem;
+      if (!item || !item.name || item.driveFolder) continue;
+      const fileId = item.name.replace(/^items\//, '');
+      if (fileId !== stat.fileId) continue;
+      targetsFile = true;
+      if (item.title) stat.title = item.title;
+      break;
+    }
+    if (!targetsFile) continue;
+
+    const eventKey = [
+      activityTime.toISOString(),
+      stat.fileId,
+      actorIds.slice().sort().join(','),
+    ].join('|');
+    if (stat.backgroundSeenEventSet.has(eventKey)) continue;
+    stat.backgroundSeenEventSet.add(eventKey);
+
+    stat.totalEditActivities += 1;
+    stat.totalActiveDaySet.add(dayKey);
+    actorIds.forEach((id) => {
+      if (allowedActorIds.has(id)) stat.actorIdSet.add(id);
+    });
+  }
 }
 
 function getActivityActorIds_(activity) {
@@ -231,7 +465,6 @@ function buildRecommendations_(seasonalityStats, now, windows, settings) {
       past.seasonalEditActivities >= settings.minSeasonalEditActivities;
     if (!seasonalEnough) return;
 
-    // 「今頃」の活動密度が、昨年度のその他期間の最低2倍あるものだけ残す。
     if (past.seasonalLift < settings.minSeasonalLift) return;
 
     const expectedStart = past.firstActivity
@@ -242,7 +475,6 @@ function buildRecommendations_(seasonalityStats, now, windows, settings) {
       past.seasonalActiveDays * 100 +
       Math.min(past.seasonalEditActivities, 50) * 5;
 
-    // 季節性は5倍を上限としてスコアへ反映し、極端な倍率による暴走を防ぐ。
     const score = Math.round(baseScore * Math.min(past.seasonalLift, 5));
 
     recommendations.push({
@@ -296,11 +528,9 @@ function finalizeSeasonalityStats_(stat, windows) {
   );
   const backgroundDays = Math.max(comparisonDays - seasonalDays, 1);
 
-  // 活動回数ではなく「その期間のうち何日に動いていたか」という活動密度で比較する。
   const seasonalRate = seasonalActiveDays / seasonalDays;
   const backgroundRate = backgroundActiveDays / backgroundDays;
 
-  // 他時期の活動が0日でも無限大にせず、年度内で1日活動した相当を下限にする。
   const backgroundFloor = 1 / backgroundDays;
   const seasonalLift = seasonalRate / Math.max(backgroundRate, backgroundFloor);
   const seasonalActivityShare =
