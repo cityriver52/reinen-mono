@@ -12,7 +12,7 @@ Google Sheets のコンテナバインド Apps Script として動作します�
 
 ```text
 Re:年モノ スプレッドシート
-├─ Config   対象フォルダ / 対象ユーザー
+├─ Config   配布先ごとの通知設定 / 対象フォルダ / 対象ユーザー
 ├─ Data     毎回再生成する集計結果
 └─ State    今年は不要 / スヌーズ / 通知済み状態
         │
@@ -45,54 +45,73 @@ score = base × min(季節性倍率, 5)
 
 季節性倍率は、今ごろの活動日密度を年度内のその他期間の活動日密度と比較したものです。
 
-## 日常運用
+## 配布先でのセットアップ
 
-**Apps Scriptのスクリプトファイルを開いて関数を実行する運用にはしません。**
+利用者は、通常 **Apps Scriptのソースファイルを開いて関数をRunしません**。コードが入ったスプレッドシートを開き、Configとカスタムメニューだけでセットアップします。
 
-コードをコンテナバインドプロジェクトへ配置した後は、スプレッドシートを再読み込みすると `Re:年モノ` カスタムメニューが表示されます。
+推奨手順:
 
-Configの黄色セルへ必要事項を入力し、原則として次の順に操作します。
-
-1. `Re:年モノ > セットアップ > ① Configを検証・反映`
-2. `Re:年モノ > 集計・通知 > ② 集計を更新`
-3. Chatを使う場合は `③ Chatテスト通知`
-4. 定期運用を始めるときは `⑤ 週次トリガーを設定`
+1. Re:年モノ スプレッドシートを開く
+2. Apps Script を **Webアプリとしてデプロイ**する
+3. 通知先の Google Chat スペースで **Incoming Webhook** を作成する
+4. Configの「通知設定」に **WebアプリURL / Chat Webhook URL** を入力する
+5. `Re:年モノ > セットアップ > ① Chat接続テスト`
+6. Configへ **対象フォルダURL / ID と対象ユーザーのメールアドレス** を入力する
+7. `Re:年モノ > セットアップ > ② 対象範囲を検証・反映`
+8. `Re:年モノ > セットアップ > ③ 実データ通知テスト`
+   - 内部では `runWeeklyReinenDigest()` を実行する
+9. Configで週次通知の曜日・時間帯を確認する
+10. `Re:年モノ > セットアップ > ④ 週次トリガーを設定`
 
 初回のメニュー操作時のみ、Googleの権限確認画面が表示されることがあります。
 
-`履歴診断` もカスタムメニューから実行でき、概要はスプレッドシート上のダイアログに表示します。実行ログを見るためにApps Scriptエディタを開く必要はありません。
-
 ## Config
 
-ユーザーが入力するのは黄色セルだけです。
+黄色セルが利用者の入力欄です。
+
+### 通知設定
+
+配布先ごとに変わるため、Script PropertiesではなくConfigを唯一の設定元とします。
+
+- `WebアプリURL`
+- `Chat Webhook URL`
+- `週次通知曜日`
+- `時間帯（0〜23時）`
+
+曜日・時間帯を変更した場合は `④ 週次トリガーを設定` を再実行します。
+
+### 対象範囲
+
+利用者が入力するのは次だけです。
 
 - 対象フォルダ: Google Drive フォルダURL / ID
 - 対象ユーザー: メールアドレス
 
-表示名、Folder ID、Actor ID、状態は `① Configを検証・反映` で自動取得します。
+表示名、Folder ID、Actor ID、状態は `② 対象範囲を検証・反映` で自動取得します。
 
 ## Script Properties
 
-初回セットアップまたは `① Configを検証・反映` の実行時に、不足しているScript Propertiesを自動作成します。既存値は上書きしません。
+利用者ごとに書き換える設定は置きません。
 
-静的な運用設定を変更したい場合だけ Apps Script の Project Settings からScript Propertiesを編集します。通常の集計・通知操作でスクリプトファイルを開く必要はありません。
+Script Propertiesは内部設定だけを保持します。
 
-主な季節性設定:
-
-- `SEASONAL_WINDOW_DAYS` = `21`
-- `MIN_SEASONAL_ACTIVE_DAYS` = `2`
-- `MIN_SEASONAL_EDIT_ACTIVITIES` = `3`
-- `MIN_SEASONAL_LIFT` = `2`
-
-通知設定:
-
-- `CHAT_WEBHOOK_URL`
-- `WEB_APP_URL`
-- `WEEKLY_DAY`
-- `WEEKLY_HOUR`
+- `SPREADSHEET_ID`
+- `ACTION_SECRET`
 - `UPCOMING_DAYS`
 - `WEEKLY_MAX_ITEMS`
 - `SNOOZE_DAYS`
+- `MAX_OVERDUE_ALERTS_PER_RUN`
+- `SEASONAL_WINDOW_DAYS`
+- `MIN_SEASONAL_ACTIVE_DAYS`
+- `MIN_SEASONAL_EDIT_ACTIVITIES`
+- `MIN_SEASONAL_LIFT`
+- `MAX_RESULTS`
+- `PAGE_SIZE`
+- `MAX_PAGES`
+
+`SPREADSHEET_ID` と不足キーはメニュー操作時に自動補完されます。`ACTION_SECRET` も自動生成されます。
+
+旧バージョンの `CHAT_WEBHOOK_URL / WEB_APP_URL / WEEKLY_DAY / WEEKLY_HOUR` は使用せず、再構築時に削除します。
 
 ## Data
 
@@ -142,18 +161,6 @@ Google Chatへの投稿はトップレベルの本文テキストを付けず、
 > 昨年の開始時期から約7日経っています。
 
 のように簡潔に表示します。
-
-## 初回導入
-
-コードをコンテナバインドApps Scriptへ配置する作業だけは開発・導入作業として必要です。配置後はスプレッドシートを再読み込みし、以降はカスタムメニューから操作します。
-
-1. 管理用Googleスプレッドシートへ本リポジトリの `.gs` と `appsscript.json` を配置
-2. Drive Activity API / People API / Drive API を有効化
-3. スプレッドシートを再読み込み
-4. 必要なら `Re:年モノ > セットアップ > 初期セットアップ / 再構築`
-5. ConfigへフォルダURLとメールアドレスを入力
-6. `① Configを検証・反映`
-7. `② 集計を更新`
 
 ## Product principle
 
