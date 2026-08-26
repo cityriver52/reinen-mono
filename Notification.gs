@@ -1,29 +1,42 @@
 /**
  * Re:年モノ - Push UX
- * 動的なファイル状態は State シート、静的な運用設定は Script Properties で管理する。
+ *
+ * 配布先ごとに変わる WebアプリURL / Chat Webhook URL / 曜日 / 時間帯は Config シート。
+ * 内部閾値とACTION_SECRETだけ Script Properties で管理する。
  */
 function getReinenUxSettings_() {
   const props = PropertiesService.getScriptProperties();
+  const spreadsheet = getReinenSpreadsheet_();
+  const configSheet = requireConfigSheet_(spreadsheet);
+  const visible = readReinenNotificationConfig_(configSheet);
+
   return {
     weeklyMaxItems: getIntProperty_(props, 'WEEKLY_MAX_ITEMS', 3),
     upcomingDays: getIntProperty_(props, 'UPCOMING_DAYS', 21),
     snoozeDays: getIntProperty_(props, 'SNOOZE_DAYS', 14),
     maxOverdueAlertsPerRun: getIntProperty_(props, 'MAX_OVERDUE_ALERTS_PER_RUN', 1),
-    weekday: String(props.getProperty('WEEKLY_DAY') || 'MONDAY').toUpperCase(),
-    hour: getIntProperty_(props, 'WEEKLY_HOUR', 9),
-    chatWebhookUrl: String(props.getProperty('CHAT_WEBHOOK_URL') || '').trim(),
-    webAppUrl: String(props.getProperty('WEB_APP_URL') || '').trim(),
+    weekday: visible.weekday,
+    weekdayDisplay: visible.weekdayDisplay,
+    hour: visible.hour,
+    chatWebhookUrl: visible.chatWebhookUrl,
+    webAppUrl: visible.webAppUrl,
     actionSecret: String(props.getProperty('ACTION_SECRET') || '').trim(),
   };
 }
 
 function setupWeeklyReinenTrigger() {
   const settings = getReinenUxSettings_();
+  validateReinenNotificationConfig_(settings, {
+    requireWebApp: true,
+    requireWebhook: true,
+    requireSchedule: true,
+  });
+
   if (!ScriptApp.WeekDay[settings.weekday]) {
-    throw new Error('WEEKLY_DAY は MONDAY〜SUNDAY で設定してください。');
+    throw new Error('Configの週次通知曜日を確認してください。');
   }
   if (settings.hour < 0 || settings.hour > 23) {
-    throw new Error('WEEKLY_HOUR は 0〜23 で設定してください。');
+    throw new Error('Configの通知時間帯は0〜23で設定してください。');
   }
 
   ScriptApp.getProjectTriggers()
@@ -36,7 +49,7 @@ function setupWeeklyReinenTrigger() {
     .atHour(settings.hour)
     .create();
 
-  return `${settings.weekday} ${settings.hour}:00ごろの週次トリガーを設定しました。`;
+  return `${settings.weekdayDisplay} ${settings.hour}:00ごろの週次トリガーを設定しました。`;
 }
 
 function runWeeklyReinenDigest() {
@@ -46,8 +59,14 @@ function runWeeklyReinenDigest() {
   const now = new Date();
   const windows = buildWindows_(now, core);
 
+  validateReinenNotificationConfig_(ux, {
+    requireWebApp: true,
+    requireWebhook: true,
+    requireSchedule: false,
+  });
+
   const stats = querySeasonalityStatsForConfig_(runtime, windows, core);
-  let recommendations = buildRecommendations_(stats, now, core)
+  let recommendations = buildRecommendations_(stats, now, windows, core)
     .sort((a, b) => b.score - a.score)
     .slice(0, core.maxResults);
   recommendations = hydrateRecommendationLocations_(recommendations);
@@ -104,11 +123,6 @@ function runWeeklyReinenDigest() {
     chatConfigured: Boolean(ux.chatWebhookUrl),
   };
 
-  if (!ux.chatWebhookUrl) {
-    console.log('CHAT_WEBHOOK_URL が空のため通知は送りません。Dataだけ更新しました。');
-    return result;
-  }
-
   for (const item of overdue) {
     sendChatPayload_(
       buildOverdueCard_(item, runtime.spreadsheet.getUrl(), year, ux),
@@ -138,6 +152,12 @@ function runWeeklyReinenDigest() {
 
 function sendTestReinenNotification() {
   const ux = getReinenUxSettings_();
+  validateReinenNotificationConfig_(ux, {
+    requireWebhook: true,
+    requireWebApp: false,
+    requireSchedule: false,
+  });
+
   sendChatPayload_(
     {
       cardsV2: [
@@ -326,7 +346,7 @@ function buildItemButtons_(item, year, ux) {
 
 function sendChatPayload_(payload, ux) {
   if (!ux.chatWebhookUrl) {
-    throw new Error('CHAT_WEBHOOK_URL が未設定です。Script Properties を編集してください。');
+    throw new Error('ConfigのChat Webhook URLが未設定です。');
   }
 
   const response = UrlFetchApp.fetch(ux.chatWebhookUrl, {
@@ -406,8 +426,7 @@ function upsertState_(spreadsheet, item, year, patch) {
       new Date(),
     ],
   ]);
-  sheet.getRange(existing.rowNumber, 5, 1, 3)
-    .setNumberFormat('yyyy-mm-dd hh:mm');
+  sheet.getRange(existing.rowNumber, 5, 1, 3).setNumberFormat('yyyy-mm-dd hh:mm');
 }
 
 function isUxSuppressedByState_(state, now) {
@@ -448,7 +467,7 @@ function buildActionUrl_(action, item, year, ux) {
 
 function signAction_(action, fileId, year, ux) {
   if (!ux.actionSecret) {
-    throw new Error('ACTION_SECRET が未設定です。初期セットアップを実行してください。');
+    throw new Error('ACTION_SECRET が未設定です。Re:年モノメニューを一度実行してください。');
   }
   return Utilities.base64EncodeWebSafe(
     Utilities.computeHmacSha256Signature(
@@ -459,9 +478,7 @@ function signAction_(action, fileId, year, ux) {
 }
 
 function verifyActionSignature_(action, fileId, year, signature) {
-  return (
-    signAction_(action, fileId, year, getReinenUxSettings_()) === signature
-  );
+  return signAction_(action, fileId, year, getReinenUxSettings_()) === signature;
 }
 
 function escapeCardText_(value) {
