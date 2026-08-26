@@ -1,15 +1,11 @@
 /**
  * Re:年モノ - core
  *
- * Configで指定した複数フォルダ / 複数ユーザーについて、
- * 「昨年の今頃が、昨年度の他時期より特に活発だった」ファイルを評価する。
- *
  * Performance strategy:
- * 1. まず季節ウィンドウ（通常43日）だけをフォルダ配下で検索する。
- * 2. その期間で最低活動量を満たしたファイルだけ、年度内のその他期間をitemNameで照会する。
- * 3. itemName照会は UrlFetchApp.fetchAll() で並列化する。
- *
- * 年度全体を対象フォルダ配下で総なめしないことが重要。
+ * 1. 対象フォルダ配下は季節ウィンドウ（通常43日）だけ検索する。
+ * 2. 最低活動量を満たした候補だけ、itemNameで昨年度全体を照会する。
+ * 3. 候補別照会は小さなfetchAll()バッチで並列化し、80 queries/分を内部上限にする。
+ * 4. 429/5xxは指数バックオフで再試行する。
  */
 const REINEN_TIME_ZONE = 'Asia/Tokyo';
 const REINEN_DRIVE_ACTIVITY_ENDPOINT = 'https://driveactivity.googleapis.com/v2/activity:query';
@@ -24,7 +20,9 @@ function getReinenCoreSettings_() {
     maxResults: getIntProperty_(props, 'MAX_RESULTS', 50),
     pageSize: getIntProperty_(props, 'PAGE_SIZE', 100),
     maxPages: getIntProperty_(props, 'MAX_PAGES', 500),
-    backgroundParallelBatchSize: 20,
+    backgroundParallelBatchSize: 8,
+    driveActivitySafeQueriesPerMinute: 80,
+    backgroundMaxRetries: 4,
   };
 }
 
@@ -86,22 +84,11 @@ function diagnoseHistory() {
   return result;
 }
 
-/**
- * Two-stage query.
- *
- * 旧方式:
- *   フォルダ配下の昨年度1年分を全取得 → 今頃 / その他へ分割
- *
- * 新方式:
- *   A. フォルダ配下の今頃だけ取得
- *   B. Aで最低活動量を満たすファイルだけ、年度内その他をitemNameで取得
- *
- * 年中大量に動くフォルダほど削減効果が大きい。
- */
 function querySeasonalityStatsForConfig_(runtime, windows, settings) {
   const startedAt = Date.now();
   const stats = {};
   const seenSeasonalEvents = new Set();
+  const rateLimiter = createDriveActivityRateLimiter_(settings);
 
   runtime.folders.forEach((folder) => {
     querySeasonalWindowForFolder_(
@@ -110,7 +97,8 @@ function querySeasonalityStatsForConfig_(runtime, windows, settings) {
       runtime.allowedActorIds,
       settings,
       stats,
-      seenSeasonalEvents
+      seenSeasonalEvents,
+      rateLimiter
     );
   });
 
@@ -135,7 +123,8 @@ function querySeasonalityStatsForConfig_(runtime, windows, settings) {
       candidates,
       windows,
       runtime.allowedActorIds,
-      settings
+      settings,
+      rateLimiter
     );
   }
 
@@ -144,8 +133,6 @@ function querySeasonalityStatsForConfig_(runtime, windows, settings) {
     `${Math.round((Date.now() - startedAt) / 100) / 10}s`
   );
 
-  // 季節窓に現れたが最低活動量を満たさなかったファイルは、
-  // 年度背景を取得していないのでここで除外して返す。
   const candidateIds = new Set(candidates.map((stat) => stat.fileId));
   Object.keys(stats).forEach((fileId) => {
     if (!candidateIds.has(fileId)) delete stats[fileId];
@@ -154,16 +141,14 @@ function querySeasonalityStatsForConfig_(runtime, windows, settings) {
   return stats;
 }
 
-/**
- * Phase A: 通常43日程度の季節ウィンドウだけをフォルダ配下で検索する。
- */
 function querySeasonalWindowForFolder_(
   folder,
   windows,
   allowedActorIds,
   settings,
   stats,
-  seenEvents
+  seenEvents,
+  rateLimiter
 ) {
   let pageToken = null;
   let pageCount = 0;
@@ -188,7 +173,8 @@ function querySeasonalWindowForFolder_(
     };
     if (pageToken) request.pageToken = pageToken;
 
-    const response = DriveActivity.Activity.query(request);
+    waitForDriveActivityQuerySlots_(rateLimiter, 1);
+    const response = queryDriveActivityWithBackoff_(request, settings, rateLimiter);
 
     for (const activity of response.activities || []) {
       const activityTime = getActivityTime_(activity);
@@ -242,16 +228,10 @@ function querySeasonalWindowForFolder_(
         });
         if (item.title) stat.title = item.title;
 
-        if (
-          !stat.seasonalFirstActivity ||
-          activityTime < stat.seasonalFirstActivity
-        ) {
+        if (!stat.seasonalFirstActivity || activityTime < stat.seasonalFirstActivity) {
           stat.seasonalFirstActivity = activityTime;
         }
-        if (
-          !stat.seasonalLastActivity ||
-          activityTime > stat.seasonalLastActivity
-        ) {
+        if (!stat.seasonalLastActivity || activityTime > stat.seasonalLastActivity) {
           stat.seasonalLastActivity = activityTime;
         }
       }
@@ -277,47 +257,98 @@ function createEmptySeasonalityStat_(fileId, title) {
   };
 }
 
-/**
- * Phase B: 季節候補だけについて、年度内の季節窓以外をitemNameで照会する。
- * 各ファイルの照会は独立しているため fetchAll() で並列化する。
- */
+function createDriveActivityRateLimiter_(settings) {
+  return {
+    timestamps: [],
+    windowMs: 60000,
+    limit: Math.max(
+      1,
+      Math.min(settings.driveActivitySafeQueriesPerMinute || 80, 90)
+    ),
+  };
+}
+
+function waitForDriveActivityQuerySlots_(limiter, count) {
+  const needed = Math.max(1, Number(count || 1));
+
+  while (true) {
+    const now = Date.now();
+    limiter.timestamps = limiter.timestamps.filter(
+      (timestamp) => now - timestamp < limiter.windowMs
+    );
+
+    if (limiter.timestamps.length + needed <= limiter.limit) {
+      const recordedAt = Date.now();
+      for (let i = 0; i < needed; i += 1) {
+        limiter.timestamps.push(recordedAt);
+      }
+      return;
+    }
+
+    const oldest = limiter.timestamps[0] || now;
+    const waitMs = Math.max(
+      1000,
+      limiter.windowMs - (now - oldest) + 500
+    );
+    console.log(
+      `[Re:年モノ] Drive Activity rate limit guard: ${waitMs}ms wait`
+    );
+    Utilities.sleep(waitMs);
+  }
+}
+
+function queryDriveActivityWithBackoff_(request, settings, rateLimiter) {
+  const maxRetries = Math.max(0, settings.backgroundMaxRetries || 4);
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return DriveActivity.Activity.query(request);
+    } catch (error) {
+      const message = String(error && error.message ? error.message : error);
+      const retryable = /429|RESOURCE_EXHAUSTED|RATE_LIMIT|500|502|503|504/i.test(message);
+      if (!retryable || attempt >= maxRetries) throw error;
+
+      const waitMs = Math.min(
+        30000,
+        Math.pow(2, attempt) * 2000 + Math.floor(Math.random() * 1000)
+      );
+      console.log(
+        `[Re:年モノ] Drive Activity retry ${attempt + 1}/${maxRetries}: ${waitMs}ms`
+      );
+      Utilities.sleep(waitMs);
+      waitForDriveActivityQuerySlots_(rateLimiter, 1);
+    }
+  }
+}
+
 function queryBackgroundForCandidatesInParallel_(
   candidates,
   windows,
   allowedActorIds,
-  settings
+  settings,
+  rateLimiter
 ) {
-  const jobs = [];
-
-  candidates.forEach((stat) => {
-    if (windows.comparisonStart < windows.seasonalStart) {
-      jobs.push(createBackgroundQueryJob_(
-        stat,
-        windows.comparisonStart,
-        windows.seasonalStart
-      ));
-    }
-    if (windows.seasonalEnd < windows.comparisonEnd) {
-      jobs.push(createBackgroundQueryJob_(
-        stat,
-        windows.seasonalEnd,
-        windows.comparisonEnd
-      ));
-    }
-  });
+  let pending = candidates.map((stat) => createBackgroundQueryJob_(
+    stat,
+    windows.comparisonStart,
+    windows.comparisonEnd
+  ));
 
   const token = ScriptApp.getOAuthToken();
   const batchSize = Math.max(
     1,
-    Math.min(settings.backgroundParallelBatchSize || 20, 50)
+    Math.min(settings.backgroundParallelBatchSize || 8, 10)
   );
-  let pending = jobs;
 
   while (pending.length > 0) {
     const nextPending = [];
+    const retryJobs = [];
+    let retryWaitMs = 0;
 
     for (let offset = 0; offset < pending.length; offset += batchSize) {
       const batch = pending.slice(offset, offset + batchSize);
+      waitForDriveActivityQuerySlots_(rateLimiter, batch.length);
+
       const requests = batch.map((job) =>
         buildBackgroundFetchRequest_(job, token, settings)
       );
@@ -326,6 +357,26 @@ function queryBackgroundForCandidatesInParallel_(
       responses.forEach((response, index) => {
         const job = batch[index];
         const status = response.getResponseCode();
+
+        if (status === 429 || status >= 500) {
+          job.retries += 1;
+          if (job.retries > settings.backgroundMaxRetries) {
+            throw new Error(
+              `Drive Activity API の候補別照会が再試行上限を超えました (${status}): ` +
+              response.getContentText().slice(0, 500)
+            );
+          }
+          retryWaitMs = Math.max(
+            retryWaitMs,
+            Math.min(
+              30000,
+              Math.pow(2, job.retries - 1) * 2000 + Math.floor(Math.random() * 1000)
+            )
+          );
+          retryJobs.push(job);
+          return;
+        }
+
         if (status < 200 || status >= 300) {
           throw new Error(
             `Drive Activity API の候補別照会に失敗しました (${status}): ` +
@@ -343,10 +394,12 @@ function queryBackgroundForCandidatesInParallel_(
         processBackgroundActivities_(
           job.stat,
           body.activities || [],
-          allowedActorIds
+          allowedActorIds,
+          windows
         );
 
         job.pages += 1;
+        job.retries = 0;
         if (job.pages > settings.maxPages) {
           throw new Error(
             `${job.stat.title}: Drive Activity API のページ数が ` +
@@ -361,7 +414,14 @@ function queryBackgroundForCandidatesInParallel_(
       });
     }
 
-    pending = nextPending;
+    if (retryJobs.length > 0) {
+      console.log(
+        `[Re:年モノ] ${retryJobs.length} queries retry after ${retryWaitMs}ms`
+      );
+      Utilities.sleep(Math.max(1000, retryWaitMs));
+    }
+
+    pending = nextPending.concat(retryJobs);
   }
 
   candidates.forEach((stat) => {
@@ -376,6 +436,7 @@ function createBackgroundQueryJob_(stat, start, end) {
     end,
     pageToken: '',
     pages: 0,
+    retries: 0,
   };
 }
 
@@ -403,10 +464,14 @@ function buildBackgroundFetchRequest_(job, token, settings) {
   };
 }
 
-function processBackgroundActivities_(stat, activities, allowedActorIds) {
+function processBackgroundActivities_(stat, activities, allowedActorIds, windows) {
   for (const activity of activities) {
     const activityTime = getActivityTime_(activity);
     if (!activityTime) continue;
+
+    if (activityTime >= windows.seasonalStart && activityTime < windows.seasonalEnd) {
+      continue;
+    }
 
     const actorIds = getActivityActorIds_(activity);
     if (!actorIds.some((id) => allowedActorIds.has(id))) continue;
@@ -552,9 +617,6 @@ function finalizeSeasonalityStats_(stat, windows) {
   };
 }
 
-/**
- * 候補に絞った後で、ファイルの格納先をルートからのパスとして解決する。
- */
 function hydrateRecommendationLocations_(recommendations) {
   return recommendations.map((item) => ({
     ...item,
@@ -712,11 +774,6 @@ function writeDataSheet_(spreadsheet, recommendations, generatedAt) {
   sheet.setColumnWidth(3, 440);
 }
 
-/**
- * 比較対象は「昨年度」（4/1〜翌3/31）。
- * その年度の中で、1年前の今日を中心に±N日の活動密度を比較する。
- * 4月初旬 / 3月末付近では季節窓をその年度内にクリップする。
- */
 function buildWindows_(now, settings) {
   const center = shiftYears_(now, -1);
   const centerYear = Number(
