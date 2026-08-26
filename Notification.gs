@@ -72,6 +72,7 @@ function runWeeklyReinenDigest() {
   recommendations = hydrateRecommendationLocations_(recommendations);
 
   writeDataSheet_(runtime.spreadsheet, recommendations, now);
+  const viewUrl = getReinenViewUrl_(runtime.spreadsheet);
 
   const year = Number(
     Utilities.formatDate(now, REINEN_TIME_ZONE, 'yyyy')
@@ -125,7 +126,7 @@ function runWeeklyReinenDigest() {
 
   for (const item of overdue) {
     sendChatPayload_(
-      buildOverdueCard_(item, runtime.spreadsheet.getUrl(), year, ux),
+      buildOverdueCard_(item, viewUrl, year, ux),
       ux
     );
     upsertState_(runtime.spreadsheet, item, year, {
@@ -136,12 +137,7 @@ function runWeeklyReinenDigest() {
 
   if (upcoming.length > 0) {
     sendChatPayload_(
-      buildWeeklyDigestCard_(
-        upcoming,
-        runtime.spreadsheet.getUrl(),
-        year,
-        ux
-      ),
+      buildWeeklyDigestCard_(upcoming, viewUrl, year, ux),
       ux
     );
   }
@@ -221,8 +217,9 @@ function doGet(e) {
   );
 }
 
-function buildWeeklyDigestCard_(items, spreadsheetUrl, year, ux) {
+function buildWeeklyDigestCard_(items, viewUrl, year, ux) {
   const widgets = [];
+  const upcomingColor = { red: 0.82, green: 0.9, blue: 1.0 };
 
   items.forEach((item) => {
     const timing =
@@ -236,17 +233,17 @@ function buildWeeklyDigestCard_(items, spreadsheetUrl, year, ux) {
 
     widgets.push({
       decoratedText: {
-        topLabel: timing,
         text:
-          `<b>${escapeCardText_(item.title)}</b>` +
+          `<font color=\"#5b78a6\"><b>${escapeCardText_(timing)}</b></font>` +
+          `<br><b>${escapeCardText_(item.title)}</b>` +
           pathText +
-          `<br>昨年同時期は${item.seasonalActiveDays}日活動（他時期比 ${item.seasonalLift.toFixed(1)}倍）。`,
+          `<br>${escapeCardText_(formatLastYearEditSummary_(item))}`,
         wrapText: true,
       },
     });
     widgets.push({
       buttonList: {
-        buttons: buildItemButtons_(item, year, ux),
+        buttons: buildItemButtons_(item, year, ux, upcomingColor),
       },
     });
     widgets.push({ divider: {} });
@@ -257,7 +254,7 @@ function buildWeeklyDigestCard_(items, spreadsheetUrl, year, ux) {
       buttons: [
         {
           text: '集計スプシを見る',
-          onClick: { openLink: { url: spreadsheetUrl } },
+          onClick: { openLink: { url: viewUrl } },
         },
       ],
     },
@@ -279,11 +276,12 @@ function buildWeeklyDigestCard_(items, spreadsheetUrl, year, ux) {
   };
 }
 
-function buildOverdueCard_(item, spreadsheetUrl, year, ux) {
-  const buttons = buildItemButtons_(item, year, ux);
+function buildOverdueCard_(item, viewUrl, year, ux) {
+  const overdueColor = { red: 1.0, green: 0.84, blue: 0.84 };
+  const buttons = buildItemButtons_(item, year, ux, overdueColor);
   buttons.push({
     text: '集計スプシを見る',
-    onClick: { openLink: { url: spreadsheetUrl } },
+    onClick: { openLink: { url: viewUrl } },
   });
 
   const pathText = item.folderPath
@@ -304,9 +302,10 @@ function buildOverdueCard_(item, spreadsheetUrl, year, ux) {
                 {
                   textParagraph: {
                     text:
+                      `<font color=\"#a84b4b\">●</font> ` +
                       `<b>${escapeCardText_(item.title)}</b>` +
                       pathText +
-                      `<br>昨年同時期は${item.seasonalActiveDays}日活動（他時期比 ${item.seasonalLift.toFixed(1)}倍）。`,
+                      `<br>${escapeCardText_(formatLastYearEditSummary_(item))}`,
                   },
                 },
                 { buttonList: { buttons } },
@@ -319,13 +318,32 @@ function buildOverdueCard_(item, spreadsheetUrl, year, ux) {
   };
 }
 
-function buildItemButtons_(item, year, ux) {
-  const buttons = [
-    {
-      text: '開く',
-      onClick: { openLink: { url: item.url } },
-    },
-  ];
+function formatLastYearEditSummary_(item) {
+  const count = Number(item.seasonalEditActivities || 0);
+  if (!item.firstActivity || !item.lastActivity) {
+    return `昨年同時期に${count}回編集`;
+  }
+  const first = Utilities.formatDate(
+    item.firstActivity,
+    REINEN_TIME_ZONE,
+    'M月d日'
+  );
+  const last = Utilities.formatDate(
+    item.lastActivity,
+    REINEN_TIME_ZONE,
+    'M月d日'
+  );
+  return `昨年${first}～${last}の間に${count}回編集`;
+}
+
+function buildItemButtons_(item, year, ux, accentColor) {
+  const openButton = {
+    text: '開く',
+    onClick: { openLink: { url: item.url } },
+  };
+  if (accentColor) openButton.color = accentColor;
+
+  const buttons = [openButton];
 
   if (!ux.webAppUrl) return buttons;
 
