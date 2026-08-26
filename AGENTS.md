@@ -10,25 +10,52 @@
 
 人事異動がある組織で使うため、個人の閲覧履歴や長期的な個人プロファイルへの依存を避けてください。
 
-もう一つの重要原則は **静かなPush** です。
+もう一つの重要原則は **静かなPush** です。RE:年モノでは recall より precision を優先し、余計な通知をしないことを品質として扱います。
 
-ユーザーに一覧を定期巡回させず、必要な時だけ少量を通知します。RE:年モノでは recall より precision を優先し、余計な通知をしないことを品質として扱います。
+## Current architecture
 
-## Current MVP
-
-- Runtime: Google Apps Script (V8)
+- Runtime: Google Apps Script V8
+- Deployment shape: **Google Sheets container-bound script**
+- Config UI: bound spreadsheet `Config` sheet
+- Ledger: same spreadsheet `おすすめ` sheet
 - Data source: Google Drive Activity API v2
+- User resolution: People API directory search
 - Main signal: `EDIT` activity
 - Identity: Google Drive File ID
 - Seasonal window: one year ago ±21 days
 - Dormancy window: recent 90 days
-- Ledger: Google Sheets
 - Primary UX: Google Chat weekly push
 - Weekly digest: max 3 items
 - Upcoming window: 0〜21 days before last year's start timing
 - Overdue alert: once per file per calendar year, max 1 per run
 - User controls: open / skip this year / snooze 14 days
-- Output folder: Google Drive `RE:年モノ`
+
+## Config model
+
+`Config` sheet contains two checkbox-based multi-select tables.
+
+### Target folders
+
+- enabled checkbox
+- display name
+- Drive folder URL or ID
+- validation status
+
+Multiple folders may be enabled. If parent/child folders overlap, the core must prevent the same activity from being counted twice.
+
+### Target users
+
+- enabled checkbox
+- display name
+- email address
+- Drive Activity Actor ID (`people/...`)
+- validation status
+
+Email addresses are resolved to `people/...` through People API `searchDirectoryPeople` and cached in the sheet.
+
+`全ユーザーを対象` bypasses the user filter.
+
+Important: Drive Activity API's query filter supports time/action detail filters but not Actor selection. **User filtering is post-query** using KnownUser Actor IDs.
 
 ## UX hierarchy
 
@@ -39,27 +66,26 @@
 
 Sheets は全候補を保持する裏側の台帳であり、主UIではありません。
 
-詳細は `docs/UX.md` を参照してください。
-
 ## Guardrails
 
-1. 担当者名・メールアドレスを推薦ロジックの主キーにしない。
-2. `File ID` を継続的な業務資産の識別子として扱う。
-3. MVP段階では LLM / AI を追加しない。まず履歴シグナルと通知UXの有用性を検証する。
-4. スコアは説明可能に保つ。複雑化する場合は `docs/MVP.md` に式と理由を書く。
-5. Google Drive Activity API の保持期間をコードや文書で断定しない。
-6. 出力ファイルはユーザー指定の `RE:年モノ` Driveフォルダへ保存する。
-7. 共有ドライブ / My Drive の違いを無視しない。対象部署フォルダがある場合は `configureSourceFolder()` で明示する。
-8. 個人情報やファイル本文を不要に保存しない。MVPではタイトル、File ID、activity日時程度に留める。
-9. 通知数を増やして取りこぼしを減らそうとしない。まず false positive と通知疲れを抑える。
-10. ユーザーに「完了」操作を要求しない。今年の編集開始を可能な限り自動停止シグナルにする。
+1. メールアドレスは設定入力であり、推薦の継続主キーにはしない。Drive activity照合には解決済みActor IDを使う。
+2. `File ID` を業務資産の継続識別子として扱う。
+3. MVP段階では LLM / AI を追加しない。
+4. スコアは説明可能に保つ。
+5. Drive Activity API の保持期間を断定しない。
+6. スタンドアロンScript＋別出力Spreadsheet構成へ戻さない。管理Spreadsheet自身がコンテナ兼台帳。
+7. 共有ドライブ / My Drive の違いを無視しない。
+8. ファイル本文を不要に保存しない。
+9. 通知数を増やして取りこぼしを減らそうとしない。false positive と通知疲れを優先して抑える。
+10. ユーザーに「完了」操作を要求しない。今年の編集開始を自動停止シグナルにする。
 11. Webhook URL や秘密値をGitにコミットしない。Script Properties に保存する。
+12. Time-driven triggerでもSpreadsheetを開けるよう、初期設定時にbound spreadsheet IDをScript Propertiesへ保存する。
 
 ## Google Chat architecture
 
 MVPは Incoming Webhook を送信経路に使います。
 
-Webhook は一方向なので、`今年は不要` と `あとで` はChat interaction eventではなく、カードの `openLink` から Apps Script Web App を開いて処理します。
+Webhook は一方向なので、`今年は不要` と `あとで` はカードの `openLink` から Apps Script Web App を開いて処理します。
 
 本格的な対話型 Chat app / Marketplace app は、MVPで価値が確認できるまで導入しません。
 
@@ -69,16 +95,13 @@ Webhook は一方向なので、`今年は不要` と `あとで` はChat intera
 - Reading: `レイネンモノ`
 - Repository / code identifier: `reinen-mono`
 
-将来 mono 系の機能名を使う場合も、意味のある機能区分として使い、ダジャレだけで機能を分割しない。
-
 ## Preferred next steps
 
-1. 実運用で週次通知のprecisionと通知量を評価
-2. 「今年は不要」「あとで」の利用状況を見て閾値を調整
+1. Configで複数フォルダ・複数ユーザーを実環境検証
+2. 実運用で週次通知のprecisionと通知量を評価
 3. 複数ファイルを1つの Seasonal Work にクラスタ化
 4. 2年前・3年前の同時期も取得できるか確認
 5. 年ごとの再現性を用いた「例年モノ度」を追加
-6. 年間タイムライン / ヒートマップ可視化
 
 ## Do not prematurely optimize
 
