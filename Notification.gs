@@ -1,180 +1,76 @@
 /**
- * RE:年モノ - Push UX
- *
- * - 普段は静かにする
- * - 週1回、開始時期が近いものを最大3件だけ Google Chat に通知
- * - 昨年の開始時期を過ぎたものは、1件につき今年1回だけ強めに通知
- * - 今年すでに編集されたファイルは推薦条件から自動的に消える
- * - 「今年は不要」「あとで」で通知を抑制できる
+ * Re:年モノ - Push UX
+ * 動的なファイル状態は State シート、静的な運用設定は Script Properties で管理する。
  */
-
-const REINEN_UX_CONFIG = Object.freeze({
-  WEEKLY_MAX_ITEMS: 3,
-  UPCOMING_DAYS: 21,
-  SNOOZE_DAYS: 14,
-  MAX_OVERDUE_ALERTS_PER_RUN: 1,
-  DEFAULT_WEEKDAY: 'MONDAY',
-  DEFAULT_HOUR: 9,
-  PROP_CHAT_WEBHOOK: 'CHAT_WEBHOOK_URL',
-  PROP_WEB_APP_URL: 'WEB_APP_URL',
-  PROP_ACTION_SECRET: 'ACTION_SECRET',
-});
-
-function configureChatWebhook(webhookUrl) {
-  if (!webhookUrl || typeof webhookUrl !== 'string') {
-    throw new Error('Google Chat の Incoming Webhook URL を指定してください。');
-  }
-  const value = webhookUrl.trim();
-  if (!/^https:\/\/chat\.googleapis\.com\//.test(value)) {
-    throw new Error('Google Chat の Incoming Webhook URL ではないようです。');
-  }
-  PropertiesService.getScriptProperties().setProperty(
-    REINEN_UX_CONFIG.PROP_CHAT_WEBHOOK,
-    value
-  );
-  return 'Google Chat webhook を保存しました。';
+function getReinenUxSettings_() {
+  const props = PropertiesService.getScriptProperties();
+  return {
+    weeklyMaxItems: getIntProperty_(props, 'WEEKLY_MAX_ITEMS', 3),
+    upcomingDays: getIntProperty_(props, 'UPCOMING_DAYS', 21),
+    snoozeDays: getIntProperty_(props, 'SNOOZE_DAYS', 14),
+    maxOverdueAlertsPerRun: getIntProperty_(props, 'MAX_OVERDUE_ALERTS_PER_RUN', 1),
+    weekday: String(props.getProperty('WEEKLY_DAY') || 'MONDAY').toUpperCase(),
+    hour: getIntProperty_(props, 'WEEKLY_HOUR', 9),
+    chatWebhookUrl: String(props.getProperty('CHAT_WEBHOOK_URL') || '').trim(),
+    webAppUrl: String(props.getProperty('WEB_APP_URL') || '').trim(),
+    actionSecret: String(props.getProperty('ACTION_SECRET') || '').trim(),
+  };
 }
 
-function configureReinenWebAppUrl(webAppUrl) {
-  if (!webAppUrl || !/^https:\/\/script\.google\.com\//.test(webAppUrl.trim())) {
-    throw new Error('Apps Script Web App のURLを指定してください。');
-  }
-  PropertiesService.getScriptProperties().setProperty(
-    REINEN_UX_CONFIG.PROP_WEB_APP_URL,
-    webAppUrl.trim()
-  );
-  ensureActionSecret_();
-  return 'Web App URL を保存しました。';
-}
-
-function setupWeeklyReinenTrigger(weekday, hour) {
-  const dayName = String(weekday || REINEN_UX_CONFIG.DEFAULT_WEEKDAY).toUpperCase();
-  const targetHour = Number.isInteger(hour) ? hour : REINEN_UX_CONFIG.DEFAULT_HOUR;
-
-  if (!ScriptApp.WeekDay[dayName]) {
-    throw new Error('weekday は MONDAY〜SUNDAY の英字で指定してください。');
-  }
-  if (targetHour < 0 || targetHour > 23) {
-    throw new Error('hour は 0〜23 で指定してください。');
-  }
-
-  ScriptApp.getProjectTriggers()
-    .filter((trigger) => trigger.getHandlerFunction() === 'runWeeklyReinenDigest')
-    .forEach((trigger) => ScriptApp.deleteTrigger(trigger));
-
-  ScriptApp.newTrigger('runWeeklyReinenDigest')
-    .timeBased()
-    .onWeekDay(ScriptApp.WeekDay[dayName])
-    .atHour(targetHour)
-    .create();
-
-  return `${dayName} ${targetHour}:00ごろの週次トリガーを設定しました。`;
+function setupWeeklyReinenTrigger() {
+  const settings = getReinenUxSettings_();
+  if (!ScriptApp.WeekDay[settings.weekday]) throw new Error('WEEKLY_DAY は MONDAY〜SUNDAY で設定してください。');
+  if (settings.hour < 0 || settings.hour > 23) throw new Error('WEEKLY_HOUR は 0〜23 で設定してください。');
+  ScriptApp.getProjectTriggers().filter((t) => t.getHandlerFunction() === 'runWeeklyReinenDigest').forEach((t) => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('runWeeklyReinenDigest').timeBased().onWeekDay(ScriptApp.WeekDay[settings.weekday]).atHour(settings.hour).create();
+  return `${settings.weekday} ${settings.hour}:00ごろの週次トリガーを設定しました。`;
 }
 
 function runWeeklyReinenDigest() {
-  const snapshot = buildReinenSnapshotForUx_();
-  const spreadsheet = getOrCreateOutputSpreadsheet_();
-  writeRecommendations_(
-    spreadsheet,
-    snapshot.recommendations,
-    snapshot.windows,
-    snapshot.runtime
-  );
+  const runtime = readReinenRuntimeConfig_();
+  const core = getReinenCoreSettings_();
+  const ux = getReinenUxSettings_();
+  const now = new Date();
+  const windows = buildWindows_(now, core);
+  const stats = queryEditStatsForConfig_(runtime, windows.seasonalStart, windows.seasonalEnd, core);
+  const recommendations = buildRecommendations_(stats, now, core).sort((a,b) => b.score - a.score).slice(0, core.maxResults);
+  writeDataSheet_(runtime.spreadsheet, recommendations, now);
 
-  const now = snapshot.now;
-  const year = Number(
-    Utilities.formatDate(now, REINEN_CONFIG.TIME_ZONE, 'yyyy')
-  );
-
-  const eligible = snapshot.recommendations
-    .filter((item) => !isUxSuppressed_(item.fileId, year, now))
-    .map((item) => ({
-      ...item,
-      daysUntilExpectedStart: daysUntilExpectedStart_(item.expectedStart, now),
-    }));
+  const year = Number(Utilities.formatDate(now, REINEN_TIME_ZONE, 'yyyy'));
+  const stateMap = loadStateMap_(runtime.spreadsheet);
+  const eligible = recommendations
+    .filter((item) => !isUxSuppressedByState_(stateMap.get(stateKey_(item.fileId, year)), now))
+    .map((item) => ({ ...item, daysUntilExpectedStart: daysUntilExpectedStart_(item.expectedStart, now) }));
 
   const overdue = eligible
     .filter((item) => item.daysUntilExpectedStart < 0)
-    .filter((item) => !wasOverdueAlertSent_(item.fileId, year))
-    .sort((a, b) => {
-      if (a.daysUntilExpectedStart !== b.daysUntilExpectedStart) {
-        return a.daysUntilExpectedStart - b.daysUntilExpectedStart;
-      }
-      return b.score - a.score;
-    })
-    .slice(0, REINEN_UX_CONFIG.MAX_OVERDUE_ALERTS_PER_RUN);
-
+    .filter((item) => { const state = stateMap.get(stateKey_(item.fileId, year)); return !state || !state.overdueSentAt; })
+    .sort((a,b) => a.daysUntilExpectedStart - b.daysUntilExpectedStart || b.score - a.score)
+    .slice(0, ux.maxOverdueAlertsPerRun);
   const upcoming = eligible
-    .filter(
-      (item) =>
-        item.daysUntilExpectedStart >= 0 &&
-        item.daysUntilExpectedStart <= REINEN_UX_CONFIG.UPCOMING_DAYS
-    )
-    .sort((a, b) => {
-      if (a.daysUntilExpectedStart !== b.daysUntilExpectedStart) {
-        return a.daysUntilExpectedStart - b.daysUntilExpectedStart;
-      }
-      return b.score - a.score;
-    })
-    .slice(0, REINEN_UX_CONFIG.WEEKLY_MAX_ITEMS);
+    .filter((item) => item.daysUntilExpectedStart >= 0 && item.daysUntilExpectedStart <= ux.upcomingDays)
+    .sort((a,b) => a.daysUntilExpectedStart - b.daysUntilExpectedStart || b.score - a.score)
+    .slice(0, ux.weeklyMaxItems);
 
-  const result = {
-    totalCandidates: snapshot.recommendations.length,
-    weeklyItems: upcoming.length,
-    overdueAlerts: 0,
-    spreadsheetUrl: spreadsheet.getUrl(),
-    chatConfigured: Boolean(getChatWebhook_()),
-  };
-
-  if (!getChatWebhook_()) {
-    console.log(
-      'CHAT_WEBHOOK_URL が未設定のため通知は送りません。おすすめシートだけ更新しました。'
-    );
-    return result;
-  }
+  const result = { totalCandidates: recommendations.length, weeklyItems: upcoming.length, overdueAlerts: 0, chatConfigured: Boolean(ux.chatWebhookUrl) };
+  if (!ux.chatWebhookUrl) { console.log('CHAT_WEBHOOK_URL が空のため通知は送りません。Dataだけ更新しました。'); return result; }
 
   for (const item of overdue) {
-    sendChatPayload_(buildOverdueCard_(item, spreadsheet.getUrl(), year));
-    markOverdueAlertSent_(item.fileId, year);
+    sendChatPayload_(buildOverdueCard_(item, runtime.spreadsheet.getUrl(), year, ux), ux);
+    upsertState_(runtime.spreadsheet, item, year, { overdueSentAt: new Date() });
     result.overdueAlerts += 1;
   }
-
-  if (upcoming.length > 0) {
-    sendChatPayload_(buildWeeklyDigestCard_(upcoming, spreadsheet.getUrl(), year));
-  }
-
+  if (upcoming.length > 0) sendChatPayload_(buildWeeklyDigestCard_(upcoming, runtime.spreadsheet.getUrl(), year, ux), ux);
   console.log(JSON.stringify(result, null, 2));
   return result;
 }
 
 function sendTestReinenNotification() {
-  const payload = {
-    text: 'RE:年モノ テスト通知',
-    cardsV2: [
-      {
-        cardId: `reinen-test-${Date.now()}`,
-        card: {
-          header: {
-            title: 'RE:年モノ',
-            subtitle: '通知の準備ができました。',
-          },
-          sections: [
-            {
-              widgets: [
-                {
-                  textParagraph: {
-                    text: 'この通知が見えていれば、Google Chat へのプッシュ経路は正常です。',
-                  },
-                },
-              ],
-            },
-          ],
-        },
-      },
-    ],
-  };
-
-  sendChatPayload_(payload);
+  const ux = getReinenUxSettings_();
+  sendChatPayload_({
+    text: 'Re:年モノ テスト通知',
+    cardsV2: [{ cardId: `reinen-test-${Date.now()}`, card: { header: { title: 'Re:年モノ', subtitle: '通知の準備ができました。' }, sections: [{ widgets: [{ textParagraph: { text: 'この通知が見えていれば、Google Chat へのプッシュ経路は正常です。' } }] }] } }]
+  }, ux);
   return 'テスト通知を送信しました。';
 }
 
@@ -182,318 +78,90 @@ function doGet(e) {
   const params = (e && e.parameter) || {};
   const action = params.action || '';
   const fileId = params.fileId || '';
+  const fileName = params.fileName || '';
   const year = Number(params.year || 0);
   const signature = params.sig || '';
+  if (!['skip','snooze'].includes(action) || !fileId || !year || !signature) return renderActionResult_('操作を確認できませんでした。', false);
+  if (!verifyActionSignature_(action, fileId, year, signature)) return renderActionResult_('このリンクは無効です。', false);
 
-  if (!['skip', 'snooze'].includes(action) || !fileId || !year || !signature) {
-    return renderActionResult_('操作を確認できませんでした。', false);
-  }
-  if (!verifyActionSignature_(action, fileId, year, signature)) {
-    return renderActionResult_('このリンクは無効か、期限切れです。', false);
-  }
-
+  const spreadsheet = getReinenSpreadsheet_();
+  const item = { fileId, title: fileName || fileId };
   if (action === 'skip') {
-    PropertiesService.getScriptProperties().setProperty(
-      skipKey_(fileId, year),
-      new Date().toISOString()
-    );
-    return renderActionResult_('今年はこのRE:年モノを通知しません。', true);
+    upsertState_(spreadsheet, item, year, { skipThisYear: true });
+    return renderActionResult_('今年はこのRe:年モノを通知しません。', true);
   }
-
-  const snoozeUntil = addDays_(new Date(), REINEN_UX_CONFIG.SNOOZE_DAYS);
-  PropertiesService.getScriptProperties().setProperty(
-    snoozeKey_(fileId),
-    snoozeUntil.toISOString()
-  );
-  return renderActionResult_(
-    `${REINEN_UX_CONFIG.SNOOZE_DAYS}日後まで、このRE:年モノを静かにしておきます。`,
-    true
-  );
+  const ux = getReinenUxSettings_();
+  upsertState_(spreadsheet, item, year, { snoozeUntil: addDays_(new Date(), ux.snoozeDays) });
+  return renderActionResult_(`${ux.snoozeDays}日後まで、このRe:年モノを静かにしておきます。`, true);
 }
 
-function buildReinenSnapshotForUx_() {
-  const now = new Date();
-  const runtime = readReinenRuntimeConfig_();
-  const windows = buildWindows_(now);
-
-  const seasonalStats = queryEditStatsForRuntime_(
-    runtime,
-    windows.seasonalStart,
-    windows.seasonalEnd
-  );
-  const recentStats = queryEditStatsForRuntime_(
-    runtime,
-    windows.recentStart,
-    windows.recentEnd
-  );
-
-  const recommendations = buildRecommendations_(seasonalStats, recentStats, now)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, REINEN_CONFIG.MAX_RESULTS);
-
-  return { now, runtime, windows, recommendations };
-}
-
-function buildWeeklyDigestCard_(items, spreadsheetUrl, year) {
+function buildWeeklyDigestCard_(items, spreadsheetUrl, year, ux) {
   const widgets = [];
-
   items.forEach((item) => {
-    const timing =
-      item.daysUntilExpectedStart === 0
-        ? '昨年は今日ごろ開始'
-        : `昨年の開始時期まであと${item.daysUntilExpectedStart}日くらい`;
-
-    widgets.push({
-      decoratedText: {
-        topLabel: timing,
-        text:
-          `<b>${escapeCardText_(item.title)}</b><br>` +
-          `昨年は ${formatDate_(item.firstActivity)}〜${formatDate_(item.lastActivity)} に ` +
-          `${item.seasonalActiveDays}日活動。直近${REINEN_CONFIG.RECENT_WINDOW_DAYS}日は動きなし。`,
-        wrapText: true,
-      },
-    });
-    widgets.push({ buttonList: { buttons: buildItemButtons_(item, year) } });
+    const timing = item.daysUntilExpectedStart === 0 ? '昨年は今日ごろ開始' : `昨年の開始時期まであと${item.daysUntilExpectedStart}日くらい`;
+    widgets.push({ decoratedText: { topLabel: timing, text: `<b>${escapeCardText_(item.title)}</b><br>昨年は ${formatDate_(item.firstActivity)}〜${formatDate_(item.lastActivity)} に ${item.seasonalActiveDays}日活動。`, wrapText: true } });
+    widgets.push({ buttonList: { buttons: buildItemButtons_(item, year, ux) } });
     widgets.push({ divider: {} });
   });
-
-  widgets.push({
-    buttonList: {
-      buttons: [
-        {
-          text: 'もっと見る',
-          onClick: { openLink: { url: spreadsheetUrl } },
-        },
-      ],
-    },
-  });
-
-  return {
-    text: `今週のRE:年モノ ${items.length}件`,
-    cardsV2: [
-      {
-        cardId: `weekly-${Date.now()}`,
-        card: {
-          header: {
-            title: '今週のRE:年モノ',
-            subtitle: 'そろそろ使いそうなものだけ、最大3件。',
-          },
-          sections: [{ widgets }],
-        },
-      },
-    ],
-  };
+  widgets.push({ buttonList: { buttons: [{ text: 'Dataを見る', onClick: { openLink: { url: spreadsheetUrl } } }] } });
+  return { text: `今週のRe:年モノ ${items.length}件`, cardsV2: [{ cardId: `weekly-${Date.now()}`, card: { header: { title: '今週のRe:年モノ', subtitle: `そろそろ使いそうなものを最大${ux.weeklyMaxItems}件。` }, sections: [{ widgets }] } }] };
 }
 
-function buildOverdueCard_(item, spreadsheetUrl, year) {
-  const daysLate = Math.abs(item.daysUntilExpectedStart);
-  const buttons = buildItemButtons_(item, year);
-  buttons.push({
-    text: '一覧を見る',
-    onClick: { openLink: { url: spreadsheetUrl } },
-  });
-
-  return {
-    text: `去年なら、もう始まっていました: ${item.title}`,
-    cardsV2: [
-      {
-        cardId: `overdue-${Date.now()}-${item.fileId}`,
-        card: {
-          header: {
-            title: '去年なら、もう始まっていました',
-            subtitle: `昨年の開始時期から約${daysLate}日経っています。`,
-          },
-          sections: [
-            {
-              widgets: [
-                {
-                  textParagraph: {
-                    text:
-                      `<b>${escapeCardText_(item.title)}</b><br>` +
-                      `昨年は ${formatDate_(item.firstActivity)} から動き始め、` +
-                      `${item.seasonalActiveDays}日活動していました。` +
-                      `今年は直近${REINEN_CONFIG.RECENT_WINDOW_DAYS}日、編集がありません。`,
-                  },
-                },
-                { buttonList: { buttons } },
-              ],
-            },
-          ],
-        },
-      },
-    ],
-  };
+function buildOverdueCard_(item, spreadsheetUrl, year, ux) {
+  const buttons = buildItemButtons_(item, year, ux);
+  buttons.push({ text: 'Dataを見る', onClick: { openLink: { url: spreadsheetUrl } } });
+  return { text: `去年なら、もう始まっていました: ${item.title}`, cardsV2: [{ cardId: `overdue-${Date.now()}-${item.fileId}`, card: { header: { title: '去年なら、もう始まっていました', subtitle: `昨年の開始時期から約${Math.abs(item.daysUntilExpectedStart)}日経っています。` }, sections: [{ widgets: [{ textParagraph: { text: `<b>${escapeCardText_(item.title)}</b><br>昨年は ${formatDate_(item.firstActivity)} から動き始め、${item.seasonalActiveDays}日活動していました。` } }, { buttonList: { buttons } }] }] } }] };
 }
 
-function buildItemButtons_(item, year) {
-  const buttons = [
-    {
-      text: '開く',
-      onClick: { openLink: { url: item.url } },
-    },
-  ];
-
-  const webAppUrl = getWebAppUrl_();
-  if (!webAppUrl) return buttons;
-
-  buttons.push({
-    text: '今年は不要',
-    onClick: {
-      openLink: { url: buildActionUrl_('skip', item.fileId, year) },
-    },
-  });
-  buttons.push({
-    text: 'あとで',
-    onClick: {
-      openLink: { url: buildActionUrl_('snooze', item.fileId, year) },
-    },
-  });
-
+function buildItemButtons_(item, year, ux) {
+  const buttons = [{ text: '開く', onClick: { openLink: { url: item.url } } }];
+  if (!ux.webAppUrl) return buttons;
+  buttons.push({ text: '今年は不要', onClick: { openLink: { url: buildActionUrl_('skip', item, year, ux) } } });
+  buttons.push({ text: 'あとで', onClick: { openLink: { url: buildActionUrl_('snooze', item, year, ux) } } });
   return buttons;
 }
 
-function sendChatPayload_(payload) {
-  const webhookUrl = getChatWebhook_();
-  if (!webhookUrl) {
-    throw new Error('CHAT_WEBHOOK_URL が未設定です。configureChatWebhook() を実行してください。');
-  }
-
-  const response = UrlFetchApp.fetch(webhookUrl, {
-    method: 'post',
-    contentType: 'application/json; charset=UTF-8',
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true,
-  });
-
+function sendChatPayload_(payload, ux) {
+  if (!ux.chatWebhookUrl) throw new Error('CHAT_WEBHOOK_URL が未設定です。Script Properties を編集してください。');
+  const response = UrlFetchApp.fetch(ux.chatWebhookUrl, { method: 'post', contentType: 'application/json; charset=UTF-8', payload: JSON.stringify(payload), muteHttpExceptions: true });
   const status = response.getResponseCode();
-  if (status < 200 || status >= 300) {
-    throw new Error(
-      `Google Chat への送信に失敗しました (${status}): ${response.getContentText()}`
-    );
-  }
+  if (status < 200 || status >= 300) throw new Error(`Google Chat への送信に失敗しました (${status}): ${response.getContentText()}`);
   return response.getContentText();
 }
 
-function getChatWebhook_() {
-  return PropertiesService.getScriptProperties().getProperty(
-    REINEN_UX_CONFIG.PROP_CHAT_WEBHOOK
-  );
+function loadStateMap_(spreadsheet) {
+  const sheet = getOrCreateSheet_(spreadsheet, REINEN_SHEET_CONFIG.STATE_SHEET);
+  initializeStateSheet_(sheet);
+  const map = new Map();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return map;
+  sheet.getRange(2, 1, lastRow - 1, 7).getValues().forEach((row, index) => {
+    const fileId = String(row[0] || '').trim(); const year = Number(row[2] || 0);
+    if (!fileId || !year) return;
+    map.set(stateKey_(fileId, year), { rowNumber: index + 2, fileId, fileName: String(row[1] || ''), year, skipThisYear: row[3] === true, snoozeUntil: coerceDateOrNull_(row[4]), overdueSentAt: coerceDateOrNull_(row[5]), updatedAt: coerceDateOrNull_(row[6]) });
+  });
+  return map;
 }
 
-function getWebAppUrl_() {
-  return (
-    ScriptApp.getService().getUrl() ||
-    PropertiesService.getScriptProperties().getProperty(
-      REINEN_UX_CONFIG.PROP_WEB_APP_URL
-    ) ||
-    ''
-  );
+function upsertState_(spreadsheet, item, year, patch) {
+  const sheet = getOrCreateSheet_(spreadsheet, REINEN_SHEET_CONFIG.STATE_SHEET);
+  initializeStateSheet_(sheet);
+  const existing = loadStateMap_(spreadsheet).get(stateKey_(item.fileId, year)) || { rowNumber: sheet.getLastRow() + 1, fileId: item.fileId, fileName: item.title || item.fileId, year, skipThisYear: false, snoozeUntil: null, overdueSentAt: null };
+  if (Object.prototype.hasOwnProperty.call(patch, 'skipThisYear')) existing.skipThisYear = Boolean(patch.skipThisYear);
+  if (Object.prototype.hasOwnProperty.call(patch, 'snoozeUntil')) existing.snoozeUntil = patch.snoozeUntil || null;
+  if (Object.prototype.hasOwnProperty.call(patch, 'overdueSentAt')) existing.overdueSentAt = patch.overdueSentAt || null;
+  existing.fileName = item.title || existing.fileName || item.fileId;
+  sheet.getRange(existing.rowNumber, 1, 1, 7).setValues([[existing.fileId, existing.fileName, year, existing.skipThisYear, existing.snoozeUntil || '', existing.overdueSentAt || '', new Date()]]);
+  sheet.getRange(existing.rowNumber, 5, 1, 3).setNumberFormat('yyyy-mm-dd hh:mm');
 }
 
-function isUxSuppressed_(fileId, year, now) {
-  const properties = PropertiesService.getScriptProperties();
-  if (properties.getProperty(skipKey_(fileId, year))) return true;
-
-  const snoozeValue = properties.getProperty(snoozeKey_(fileId));
-  if (!snoozeValue) return false;
-
-  const until = new Date(snoozeValue);
-  if (!Number.isFinite(until.getTime()) || until <= now) {
-    properties.deleteProperty(snoozeKey_(fileId));
-    return false;
-  }
-  return true;
-}
-
-function wasOverdueAlertSent_(fileId, year) {
-  return Boolean(
-    PropertiesService.getScriptProperties().getProperty(overdueKey_(fileId, year))
-  );
-}
-
-function markOverdueAlertSent_(fileId, year) {
-  PropertiesService.getScriptProperties().setProperty(
-    overdueKey_(fileId, year),
-    new Date().toISOString()
-  );
-}
-
-function skipKey_(fileId, year) {
-  return `UX_SKIP_${year}_${fileId}`;
-}
-
-function snoozeKey_(fileId) {
-  return `UX_SNOOZE_${fileId}`;
-}
-
-function overdueKey_(fileId, year) {
-  return `UX_OVERDUE_SENT_${year}_${fileId}`;
-}
-
-function daysUntilExpectedStart_(expectedStart, now) {
-  if (!expectedStart) return Number.MAX_SAFE_INTEGER;
-  return -diffCalendarDays_(expectedStart, now);
-}
-
-function buildActionUrl_(action, fileId, year) {
-  const baseUrl = getWebAppUrl_();
-  if (!baseUrl) return '';
-
-  const signature = signAction_(action, fileId, year);
-  const params = [
-    `action=${encodeURIComponent(action)}`,
-    `fileId=${encodeURIComponent(fileId)}`,
-    `year=${encodeURIComponent(year)}`,
-    `sig=${encodeURIComponent(signature)}`,
-  ].join('&');
-
-  return `${baseUrl}?${params}`;
-}
-
-function signAction_(action, fileId, year) {
-  const secret = ensureActionSecret_();
-  const raw = `${action}|${fileId}|${year}`;
-  return Utilities.base64EncodeWebSafe(
-    Utilities.computeHmacSha256Signature(raw, secret)
-  ).replace(/=+$/, '');
-}
-
-function verifyActionSignature_(action, fileId, year, signature) {
-  return signAction_(action, fileId, year) === signature;
-}
-
-function ensureActionSecret_() {
-  const properties = PropertiesService.getScriptProperties();
-  let secret = properties.getProperty(REINEN_UX_CONFIG.PROP_ACTION_SECRET);
-  if (!secret) {
-    secret = `${Utilities.getUuid()}-${Utilities.getUuid()}`;
-    properties.setProperty(REINEN_UX_CONFIG.PROP_ACTION_SECRET, secret);
-  }
-  return secret;
-}
-
-function escapeCardText_(value) {
-  return String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-function renderActionResult_(message, success) {
-  const title = success ? '設定しました' : '操作できませんでした';
-  const safeMessage = escapeHtml_(message);
-  return HtmlService.createHtmlOutput(
-    `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-      `<title>RE:年モノ</title></head><body style="font-family:system-ui,sans-serif;max-width:520px;margin:48px auto;padding:0 20px;line-height:1.7">` +
-      `<h2>${title}</h2><p>${safeMessage}</p><p>この画面は閉じて大丈夫です。</p></body></html>`
-  );
-}
-
-function escapeHtml_(value) {
-  return String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
+function isUxSuppressedByState_(state, now) { return Boolean(state && (state.skipThisYear || (state.snoozeUntil && state.snoozeUntil > now))); }
+function stateKey_(fileId, year) { return `${year}|${fileId}`; }
+function coerceDateOrNull_(value) { if (!value) return null; if (value instanceof Date && Number.isFinite(value.getTime())) return value; const d = new Date(value); return Number.isFinite(d.getTime()) ? d : null; }
+function daysUntilExpectedStart_(expectedStart, now) { return expectedStart ? -diffCalendarDays_(expectedStart, now) : Number.MAX_SAFE_INTEGER; }
+function buildActionUrl_(action, item, year, ux) { const sig = signAction_(action, item.fileId, year, ux); return `${ux.webAppUrl}?action=${encodeURIComponent(action)}&fileId=${encodeURIComponent(item.fileId)}&fileName=${encodeURIComponent(item.title || '')}&year=${encodeURIComponent(year)}&sig=${encodeURIComponent(sig)}`; }
+function signAction_(action, fileId, year, ux) { if (!ux.actionSecret) throw new Error('ACTION_SECRET が未設定です。初期セットアップを実行してください。'); return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(`${action}|${fileId}|${year}`, ux.actionSecret)).replace(/=+$/, ''); }
+function verifyActionSignature_(action, fileId, year, signature) { return signAction_(action, fileId, year, getReinenUxSettings_()) === signature; }
+function escapeCardText_(value) { return String(value || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function renderActionResult_(message, success) { return HtmlService.createHtmlOutput(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Re:年モノ</title></head><body style="font-family:system-ui,sans-serif;max-width:520px;margin:48px auto;padding:0 20px;line-height:1.7"><h2>${success ? '設定しました' : '操作できませんでした'}</h2><p>${escapeHtml_(message)}</p><p>この画面は閉じて大丈夫です。</p></body></html>`); }
+function escapeHtml_(value) { return String(value || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
