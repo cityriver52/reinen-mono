@@ -15,9 +15,18 @@ const REINEN_SHEET_CONFIG = Object.freeze({
   USER_HEADER_ROW: 32,
   USER_FIRST_ROW: 33,
   USER_LAST_ROW: 52,
+  PROP_BOUND_SPREADSHEET_ID: 'BOUND_SPREADSHEET_ID',
 });
 
 function onOpen() {
+  const active = SpreadsheetApp.getActiveSpreadsheet();
+  if (active) {
+    PropertiesService.getScriptProperties().setProperty(
+      REINEN_SHEET_CONFIG.PROP_BOUND_SPREADSHEET_ID,
+      active.getId()
+    );
+  }
+
   SpreadsheetApp.getUi()
     .createMenu('RE:年モノ')
     .addItem('初期設定 / Configを作成', 'setupReinenMonoWorkbook')
@@ -30,11 +39,13 @@ function onOpen() {
     .addToUi();
 }
 
-/**
- * バインド先スプレッドシートに Config / おすすめ シートを用意する。
- */
 function setupReinenMonoWorkbook() {
   const ss = requireBoundSpreadsheet_();
+  PropertiesService.getScriptProperties().setProperty(
+    REINEN_SHEET_CONFIG.PROP_BOUND_SPREADSHEET_ID,
+    ss.getId()
+  );
+
   const config = getOrCreateSheet_(ss, REINEN_SHEET_CONFIG.CONFIG_SHEET);
   const recommendations = getOrCreateSheet_(
     ss,
@@ -55,9 +66,6 @@ function setupReinenMonoWorkbook() {
   return ss.getUrl();
 }
 
-/**
- * Configの入力を検証し、フォルダ名・ユーザー名・Actor IDを更新する。
- */
 function refreshReinenConfig() {
   const ss = requireBoundSpreadsheet_();
   const sheet = requireConfigSheet_(ss);
@@ -65,14 +73,17 @@ function refreshReinenConfig() {
   refreshFolderRows_(sheet);
   refreshUserRows_(sheet);
 
-  // 最終的に実行可能な設定かも確認する。
   const runtime = readReinenRuntimeConfig_();
   SpreadsheetApp.flush();
 
   const summary =
     `対象フォルダ: ${runtime.folders.length} / ` +
     `対象ユーザー: ${runtime.allUsers ? '全ユーザー' : runtime.users.length}`;
-  ss.toast(summary, 'RE:年モノ', 5);
+  try {
+    ss.toast(summary, 'RE:年モノ', 5);
+  } catch (error) {
+    console.log(summary);
+  }
   return summary;
 }
 
@@ -154,8 +165,9 @@ function refreshFolderRows_(sheet) {
     REINEN_SHEET_CONFIG.FOLDER_LAST_ROW -
     REINEN_SHEET_CONFIG.FOLDER_FIRST_ROW +
     1;
-  const range = sheet.getRange(REINEN_SHEET_CONFIG.FOLDER_FIRST_ROW, 1, rowCount, 4);
-  const values = range.getValues();
+  const values = sheet
+    .getRange(REINEN_SHEET_CONFIG.FOLDER_FIRST_ROW, 1, rowCount, 4)
+    .getValues();
 
   values.forEach((row, index) => {
     const enabled = row[0] === true;
@@ -206,9 +218,6 @@ function refreshUserRows_(sheet) {
   });
 }
 
-/**
- * 実行時設定を Config シートから読む。
- */
 function readReinenRuntimeConfig_() {
   const ss = requireBoundSpreadsheet_();
   const sheet = requireConfigSheet_(ss);
@@ -223,7 +232,6 @@ function readReinenRuntimeConfig_() {
     throw new Error('Configで対象ユーザーを1件以上有効にするか、「全ユーザーを対象」をONにしてください。');
   }
 
-  // root が含まれる場合は他のフォルダがすべて包含されるため root のみで取得する。
   const effectiveFolders = folders.some((folder) => folder.id === 'root')
     ? folders.filter((folder) => folder.id === 'root').slice(0, 1)
     : uniqueBy_(folders, (folder) => folder.id);
@@ -344,11 +352,25 @@ function normalizeEmail_(value) {
 }
 
 function requireBoundSpreadsheet_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  if (!ss) {
-    throw new Error('このスクリプトはGoogleスプレッドシートのコンテナバインドスクリプトとして使用してください。');
+  const active = SpreadsheetApp.getActiveSpreadsheet();
+  if (active) {
+    PropertiesService.getScriptProperties().setProperty(
+      REINEN_SHEET_CONFIG.PROP_BOUND_SPREADSHEET_ID,
+      active.getId()
+    );
+    return active;
   }
-  return ss;
+
+  const storedId = PropertiesService.getScriptProperties().getProperty(
+    REINEN_SHEET_CONFIG.PROP_BOUND_SPREADSHEET_ID
+  );
+  if (storedId) {
+    return SpreadsheetApp.openById(storedId);
+  }
+
+  throw new Error(
+    'バインド先スプレッドシートを特定できません。スプレッドシートを開いて「RE:年モノ > 初期設定 / Configを作成」を一度実行してください。'
+  );
 }
 
 function requireConfigSheet_(ss) {
