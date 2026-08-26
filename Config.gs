@@ -40,6 +40,11 @@ const REINEN_PROPERTY_DEFAULTS = Object.freeze({
   MAX_PAGES: '500',
 });
 
+const REINEN_DEPRECATED_PROPERTIES = Object.freeze([
+  'SEASONAL_COMPARISON_DAYS',
+  'MIN_SEASONAL_ACTIVITY_SHARE',
+]);
+
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Re:年モノ')
@@ -89,6 +94,7 @@ function setupScriptProperties_() {
   });
 
   if (Object.keys(updates).length > 0) props.setProperties(updates, false);
+  REINEN_DEPRECATED_PROPERTIES.forEach((key) => props.deleteProperty(key));
 }
 
 function refreshReinenConfig() {
