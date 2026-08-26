@@ -45,9 +45,37 @@ score = base × min(季節性倍率, 5)
 
 季節性倍率は、今ごろの活動日密度を年度内のその他期間の活動日密度と比較したものです。
 
+## 日常運用
+
+**Apps Scriptのスクリプトファイルを開いて関数を実行する運用にはしません。**
+
+コードをコンテナバインドプロジェクトへ配置した後は、スプレッドシートを再読み込みすると `Re:年モノ` カスタムメニューが表示されます。
+
+Configの黄色セルへ必要事項を入力し、原則として次の順に操作します。
+
+1. `Re:年モノ > セットアップ > ① Configを検証・反映`
+2. `Re:年モノ > 集計・通知 > ② 集計を更新`
+3. Chatを使う場合は `③ Chatテスト通知`
+4. 定期運用を始めるときは `⑤ 週次トリガーを設定`
+
+初回のメニュー操作時のみ、Googleの権限確認画面が表示されることがあります。
+
+`履歴診断` もカスタムメニューから実行でき、概要はスプレッドシート上のダイアログに表示します。実行ログを見るためにApps Scriptエディタを開く必要はありません。
+
+## Config
+
+ユーザーが入力するのは黄色セルだけです。
+
+- 対象フォルダ: Google Drive フォルダURL / ID
+- 対象ユーザー: メールアドレス
+
+表示名、Folder ID、Actor ID、状態は `① Configを検証・反映` で自動取得します。
+
 ## Script Properties
 
-初回 `setupReinenMonoWorkbook()` で必要なプロパティを作成します。以後は Apps Script のプロジェクト設定から直接変更します。
+初回セットアップまたは `① Configを検証・反映` の実行時に、不足しているScript Propertiesを自動作成します。既存値は上書きしません。
+
+静的な運用設定を変更したい場合だけ Apps Script の Project Settings からScript Propertiesを編集します。通常の集計・通知操作でスクリプトファイルを開く必要はありません。
 
 主な季節性設定:
 
@@ -66,17 +94,6 @@ score = base × min(季節性倍率, 5)
 - `WEEKLY_MAX_ITEMS`
 - `SNOOZE_DAYS`
 
-新しいプロパティを追加したリリースへ更新した場合は、`setupReinenMonoWorkbook()` を再実行すると不足キーだけ補完されます。既存値は上書きしません。
-
-## Config
-
-ユーザーが入力するのは黄色セルだけです。
-
-- 対象フォルダ: Google Drive フォルダURL / ID
-- 対象ユーザー: メールアドレス
-
-表示名、Folder ID、Actor ID、状態は自動取得します。
-
 ## Data
 
 内部集計用シートです。タイトルや説明文は置きません。
@@ -91,7 +108,6 @@ score = base × min(季節性倍率, 5)
 - `other_period_active_days`
 - `other_period_edit_activities`
 - `seasonal_lift`
-- `seasonal_activity_share`
 - `last_year_first_activity`
 - `last_year_last_activity`
 - `expected_start`
@@ -121,23 +137,23 @@ score = base × min(季節性倍率, 5)
 
 Google Chatへの投稿はトップレベルの本文テキストを付けず、カードのみ送信します。
 
-開始時期を過ぎた通知では、`去年なら、もう始まっていました` という見出しは使わず、
+開始時期を過ぎた通知では、
 
 > 昨年の開始時期から約7日経っています。
 
 のように簡潔に表示します。
 
-## セットアップ
+## 初回導入
 
-1. 管理用Googleスプレッドシートを開く
-2. **拡張機能 → Apps Script**
-3. このリポジトリの `.gs` と `appsscript.json` を配置
-4. Drive Activity API / People API / Drive API を有効化
-5. `setupReinenMonoWorkbook()`
-6. ConfigへフォルダURLとメールアドレスを入力
-7. `refreshReinenConfig()`
-8. `diagnoseHistory()`
-9. `runReinenMono()`
+コードをコンテナバインドApps Scriptへ配置する作業だけは開発・導入作業として必要です。配置後はスプレッドシートを再読み込みし、以降はカスタムメニューから操作します。
+
+1. 管理用Googleスプレッドシートへ本リポジトリの `.gs` と `appsscript.json` を配置
+2. Drive Activity API / People API / Drive API を有効化
+3. スプレッドシートを再読み込み
+4. 必要なら `Re:年モノ > セットアップ > 初期セットアップ / 再構築`
+5. ConfigへフォルダURLとメールアドレスを入力
+6. `① Configを検証・反映`
+7. `② 集計を更新`
 
 ## Product principle
 
