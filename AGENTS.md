@@ -10,6 +10,7 @@
 - UXは **静かなPush**。recallよりprecisionを優先する。
 - 単なる昨年利用ではなく、**年度内での季節的な偏り**を検出する。
 - ユーザー入力と内部データを分離する。
+- 日常運用でApps Scriptのソースファイルを開かせない。**Config + カスタムメニュー**を操作面とする。
 
 ## Architecture
 
@@ -35,6 +36,8 @@
 
 表示名、Folder ID、Actor ID、状態は自動解決する。チェックボックスや all-users toggle は再導入しない。
 
+入力後はカスタムメニュー `Re:年モノ > セットアップ > ① Configを検証・反映` を実行する。
+
 ### Data
 
 内部生成データのみ。Row 1 は machine-oriented headers。タイトル、キャッチコピー、説明ブロックは置かない。
@@ -52,9 +55,27 @@
 
 これらを Script Properties に戻さない。
 
+## Menu-driven operation
+
+Apps Script editorから関数を直接Runすることを通常手順にしない。
+
+カスタムメニューは少なくとも以下を提供する。
+
+- 初期セットアップ / 再構築
+- ① Configを検証・反映
+- 履歴診断（結果概要はSheet上のdialogで表示）
+- ② 集計を更新
+- ③ Chatテスト通知
+- ④ 週次通知を今すぐ実行
+- ⑤ 週次トリガーを設定
+
+Config反映時に、`SPREADSHEET_ID`、不足しているScript Properties、`Data` / `State` の最低限の構造を補完する。新しいリリース導入のたびにユーザーへ「エディタでsetup関数をRunしてください」と要求しない。
+
+初回のメニュー操作時にGoogleのauthorization flowが表示されることは許容する。
+
 ## Script Properties
 
-静的運用設定のみ。初回 `setupReinenMonoWorkbook()` で不足キーを作り、以後は Apps Script Project Settings から手動メンテナンスする。
+静的運用設定のみ。不足キーは初回セットアップまたはConfig反映時に自動作成する。既存値は勝手に上書きしない。
 
 主要な季節性設定:
 
@@ -62,6 +83,8 @@
 - `MIN_SEASONAL_ACTIVE_DAYS=2`
 - `MIN_SEASONAL_EDIT_ACTIVITIES=3`
 - `MIN_SEASONAL_LIFT=2`
+
+Webhook URLやsecretはSheetのセルへ平文保存せず、Script Propertiesに保持する。
 
 ## Detection logic
 
@@ -121,3 +144,4 @@ Drive Activity queryではActorを直接指定できないため、folder/time/a
 9. Prefer explainable seasonality metrics over opaque scoring.
 10. Year-round frequently used files should normally be filtered out rather than ranked highly.
 11. The comparison period is fiscal year (Apr 1–Mar 31), not calendar year or rolling 365 days.
+12. Do not make editor-based function execution part of normal user operations.
