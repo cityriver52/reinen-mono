@@ -10,11 +10,9 @@ function getReinenCoreSettings_() {
   const props = PropertiesService.getScriptProperties();
   return {
     seasonalWindowDays: getIntProperty_(props, 'SEASONAL_WINDOW_DAYS', 21),
-    comparisonDays: getIntProperty_(props, 'SEASONAL_COMPARISON_DAYS', 365),
     minSeasonalActiveDays: getIntProperty_(props, 'MIN_SEASONAL_ACTIVE_DAYS', 2),
     minSeasonalEditActivities: getIntProperty_(props, 'MIN_SEASONAL_EDIT_ACTIVITIES', 3),
     minSeasonalLift: getNumberProperty_(props, 'MIN_SEASONAL_LIFT', 2.0),
-    minSeasonalActivityShare: getNumberProperty_(props, 'MIN_SEASONAL_ACTIVITY_SHARE', 0.30),
     maxResults: getIntProperty_(props, 'MAX_RESULTS', 50),
     pageSize: getIntProperty_(props, 'PAGE_SIZE', 100),
     maxPages: getIntProperty_(props, 'MAX_PAGES', 500),
@@ -28,7 +26,7 @@ function runReinenMono() {
   const windows = buildWindows_(now, settings);
 
   const stats = querySeasonalityStatsForConfig_(runtime, windows, settings);
-  let recommendations = buildRecommendations_(stats, now, settings)
+  let recommendations = buildRecommendations_(stats, now, windows, settings)
     .sort((a, b) => b.score - a.score)
     .slice(0, settings.maxResults);
 
@@ -38,6 +36,7 @@ function runReinenMono() {
   const result = {
     count: recommendations.length,
     spreadsheetUrl: runtime.spreadsheet.getUrl(),
+    comparisonYear: windows.comparisonYear,
     folders: runtime.folders.length,
     users: runtime.users.length,
   };
@@ -56,8 +55,7 @@ function diagnoseHistory() {
   ).map((stat) => finalizeSeasonalityStats_(stat, windows));
 
   const result = {
-    folders: runtime.folders.map((x) => ({ id: x.id, name: x.name })),
-    users: runtime.users.map((x) => ({ email: x.email, actorId: x.actorId })),
+    comparisonYear: windows.comparisonYear,
     comparisonStart: windows.comparisonStart.toISOString(),
     comparisonEndExclusive: windows.comparisonEnd.toISOString(),
     seasonalStart: windows.seasonalStart.toISOString(),
@@ -65,7 +63,10 @@ function diagnoseHistory() {
     filesFound: values.length,
     top20: values
       .filter((x) => x.seasonalActiveDays > 0)
-      .sort((a, b) => b.seasonalLift - a.seasonalLift || b.seasonalActiveDays - a.seasonalActiveDays)
+      .sort((a, b) =>
+        b.seasonalLift - a.seasonalLift ||
+        b.seasonalActiveDays - a.seasonalActiveDays
+      )
       .slice(0, 20),
   };
   console.log(JSON.stringify(result, null, 2));
@@ -73,12 +74,13 @@ function diagnoseHistory() {
 }
 
 /**
- * 365日前後の比較期間を一度取得し、その中で「今頃」と「その他」を分けて集計する。
+ * 昨年1年間を一度取得し、その中で「今頃」と「その他」を分けて集計する。
  */
 function querySeasonalityStatsForConfig_(runtime, windows, settings) {
   const stats = {};
   const seenEvents = new Set();
-  runtime.folders.forEach((folder) =>
+
+  runtime.folders.forEach((folder) => {
     querySeasonalityStats_(
       folder,
       windows,
@@ -86,12 +88,20 @@ function querySeasonalityStatsForConfig_(runtime, windows, settings) {
       settings,
       stats,
       seenEvents
-    )
-  );
+    );
+  });
+
   return stats;
 }
 
-function querySeasonalityStats_(folder, windows, allowedActorIds, settings, stats, seenEvents) {
+function querySeasonalityStats_(
+  folder,
+  windows,
+  allowedActorIds,
+  settings,
+  stats,
+  seenEvents
+) {
   let pageToken = null;
   let pageCount = 0;
 
@@ -99,7 +109,8 @@ function querySeasonalityStats_(folder, windows, allowedActorIds, settings, stat
     pageCount += 1;
     if (pageCount > settings.maxPages) {
       throw new Error(
-        `Drive Activity API のページ数が ${settings.maxPages} を超えました。対象フォルダを絞るか MAX_PAGES を調整してください。`
+        `Drive Activity API のページ数が ${settings.maxPages} を超えました。` +
+        '対象フォルダを絞るか MAX_PAGES を調整してください。'
       );
     }
 
@@ -109,8 +120,8 @@ function querySeasonalityStats_(folder, windows, allowedActorIds, settings, stat
       pageSize: settings.pageSize,
       filter:
         'detail.action_detail_case:EDIT ' +
-        `time >= \"${windows.comparisonStart.toISOString()}\" ` +
-        `time < \"${windows.comparisonEnd.toISOString()}\"`,
+        `time >= "${windows.comparisonStart.toISOString()}" ` +
+        `time < "${windows.comparisonEnd.toISOString()}"`,
     };
     if (pageToken) request.pageToken = pageToken;
 
@@ -131,8 +142,8 @@ function querySeasonalityStats_(folder, windows, allowedActorIds, settings, stat
       const isSeasonal =
         activityTime >= windows.seasonalStart &&
         activityTime < windows.seasonalEnd;
-      const seenFileIds = new Set();
 
+      const seenFileIds = new Set();
       for (const target of activity.targets || []) {
         const item = target.driveItem;
         if (!item || !item.name || item.driveFolder) continue;
@@ -180,10 +191,16 @@ function querySeasonalityStats_(folder, windows, allowedActorIds, settings, stat
         if (isSeasonal) {
           stat.seasonalEditActivities += 1;
           stat.seasonalActiveDaySet.add(dayKey);
-          if (!stat.seasonalFirstActivity || activityTime < stat.seasonalFirstActivity) {
+          if (
+            !stat.seasonalFirstActivity ||
+            activityTime < stat.seasonalFirstActivity
+          ) {
             stat.seasonalFirstActivity = activityTime;
           }
-          if (!stat.seasonalLastActivity || activityTime > stat.seasonalLastActivity) {
+          if (
+            !stat.seasonalLastActivity ||
+            activityTime > stat.seasonalLastActivity
+          ) {
             stat.seasonalLastActivity = activityTime;
           }
         }
@@ -203,8 +220,7 @@ function getActivityActorIds_(activity) {
   return Array.from(ids);
 }
 
-function buildRecommendations_(seasonalityStats, now, settings) {
-  const windows = buildWindows_(now, settings);
+function buildRecommendations_(seasonalityStats, now, windows, settings) {
   const recommendations = [];
 
   Object.keys(seasonalityStats).forEach((fileId) => {
@@ -215,8 +231,8 @@ function buildRecommendations_(seasonalityStats, now, settings) {
       past.seasonalEditActivities >= settings.minSeasonalEditActivities;
     if (!seasonalEnough) return;
 
+    // 「今頃」の活動密度が、昨年のその他期間の最低2倍あるものだけ残す。
     if (past.seasonalLift < settings.minSeasonalLift) return;
-    if (past.seasonalActivityShare < settings.minSeasonalActivityShare) return;
 
     const expectedStart = past.firstActivity
       ? shiftYears_(past.firstActivity, 1)
@@ -225,6 +241,8 @@ function buildRecommendations_(seasonalityStats, now, settings) {
     const baseScore =
       past.seasonalActiveDays * 100 +
       Math.min(past.seasonalEditActivities, 50) * 5;
+
+    // 季節性は5倍を上限としてスコアへ反映し、極端な倍率による暴走を防ぐ。
     const score = Math.round(baseScore * Math.min(past.seasonalLift, 5));
 
     recommendations.push({
@@ -258,6 +276,7 @@ function finalizeSeasonalityStats_(stat, windows) {
   const seasonalActiveDays = stat.seasonalActiveDaySet
     ? stat.seasonalActiveDaySet.size
     : 0;
+
   const backgroundActiveDays = Math.max(
     totalActiveDays - seasonalActiveDays,
     0
@@ -279,7 +298,8 @@ function finalizeSeasonalityStats_(stat, windows) {
 
   const seasonalRate = seasonalActiveDays / seasonalDays;
   const backgroundRate = backgroundActiveDays / backgroundDays;
-  // 他時期が0日の場合も無限大にせず、「比較期間に1日使った」相当を下限にする。
+
+  // 他時期の活動が0日でも無限大にせず、比較期間で1日活動した相当を下限にする。
   const backgroundFloor = 1 / backgroundDays;
   const seasonalLift = seasonalRate / Math.max(backgroundRate, backgroundFloor);
   const seasonalActivityShare =
@@ -302,7 +322,7 @@ function finalizeSeasonalityStats_(stat, windows) {
 }
 
 /**
- * 候補に絞った後でDrive階層を解決する。API呼び出しを増やしすぎないため全ファイルには行わない。
+ * 候補に絞った後で、ファイルの格納先をルートからのパスとして解決する。
  */
 function hydrateRecommendationLocations_(recommendations) {
   return recommendations.map((item) => ({
@@ -319,13 +339,16 @@ function resolveFileFolderPath_(fileId) {
 
   let path = '';
   try {
-    const file = DriveApp.getFileById(fileId);
-    const parentIterator = file.getParents();
-    const paths = [];
-    while (parentIterator.hasNext()) {
-      paths.push(buildFolderPath_(parentIterator.next()));
+    const meta = getDriveMeta_(fileId);
+    const parentIds = meta.parents || [];
+    if (parentIds.length === 0) {
+      path = '(ルート階層なし)';
+    } else {
+      const paths = parentIds
+        .map((parentId) => buildFolderPathById_(parentId))
+        .filter(Boolean);
+      path = Array.from(new Set(paths)).join(' | ');
     }
-    path = Array.from(new Set(paths.filter(Boolean))).join(' | ');
   } catch (error) {
     path = '(フォルダ階層を取得できません)';
   }
@@ -336,35 +359,51 @@ function resolveFileFolderPath_(fileId) {
   return path;
 }
 
-function buildFolderPath_(folder) {
+function buildFolderPathById_(folderId) {
   const names = [];
   const seen = new Set();
-  let current = folder;
+  let currentId = folderId;
   let guard = 0;
 
-  while (current && guard < 50) {
+  while (currentId && guard < 60) {
     guard += 1;
-    let id = '';
-    try {
-      id = current.getId();
-    } catch (error) {
-      break;
-    }
-    if (!id || seen.has(id)) break;
-    seen.add(id);
+    if (seen.has(currentId)) break;
+    seen.add(currentId);
 
-    try {
-      names.unshift(current.getName());
-    } catch (error) {
-      names.unshift(id);
-    }
+    const meta = getDriveMeta_(currentId);
+    names.unshift(meta.name || currentId);
 
-    const parents = current.getParents();
-    if (!parents.hasNext()) break;
-    current = parents.next();
+    const parents = meta.parents || [];
+    if (parents.length === 0) break;
+    currentId = parents[0];
   }
 
   return names.join(' / ');
+}
+
+function getDriveMeta_(fileId) {
+  const cache = CacheService.getScriptCache();
+  const key = `REINEN_META_${fileId}`;
+  const cached = cache.get(key);
+  if (cached) return JSON.parse(cached);
+
+  const meta = Drive.Files.get(fileId, {
+    fields: 'id,name,parents,driveId,mimeType',
+    supportsAllDrives: true,
+  });
+
+  const compact = {
+    id: meta.id || fileId,
+    name: meta.name || '',
+    parents: meta.parents || [],
+    driveId: meta.driveId || '',
+    mimeType: meta.mimeType || '',
+  };
+
+  try {
+    cache.put(key, JSON.stringify(compact), 21600);
+  } catch (error) {}
+  return compact;
 }
 
 function writeDataSheet_(spreadsheet, recommendations, generatedAt) {
@@ -395,11 +434,15 @@ function writeDataSheet_(spreadsheet, recommendations, generatedAt) {
   ];
 
   if (sheet.getMaxColumns() < headers.length) {
-    sheet.insertColumnsAfter(sheet.getMaxColumns(), headers.length - sheet.getMaxColumns());
+    sheet.insertColumnsAfter(
+      sheet.getMaxColumns(),
+      headers.length - sheet.getMaxColumns()
+    );
   }
 
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  sheet.getRange(1, 1, 1, headers.length)
+  sheet
+    .getRange(1, 1, 1, headers.length)
     .setFontWeight('bold')
     .setBackground('#eeeeee');
 
@@ -435,20 +478,35 @@ function writeDataSheet_(spreadsheet, recommendations, generatedAt) {
 
   sheet.setFrozenRows(1);
   sheet.setColumnWidth(2, 300);
-  sheet.setColumnWidth(3, 420);
+  sheet.setColumnWidth(3, 440);
 }
 
+/**
+ * 比較対象は「去年」の暦年。
+ * その年の中で、1年前の今日を中心に±N日の活動密度を比較する。
+ * 年初・年末では季節窓をその暦年内にクリップする。
+ */
 function buildWindows_(now, settings) {
   const center = shiftYears_(now, -1);
-  const seasonalStart = addDays_(center, -settings.seasonalWindowDays);
-  const seasonalEnd = addDays_(center, settings.seasonalWindowDays + 1);
-  const seasonalLength = calendarDaySpan_(seasonalStart, seasonalEnd);
-  const comparisonDays = Math.max(settings.comparisonDays, seasonalLength + 1);
-  const beforeDays = Math.floor((comparisonDays - 1) / 2);
-  const comparisonStart = addDays_(center, -beforeDays);
-  const comparisonEnd = addDays_(comparisonStart, comparisonDays);
+  const comparisonYear = Number(
+    Utilities.formatDate(center, REINEN_TIME_ZONE, 'yyyy')
+  );
+
+  const comparisonStart = new Date(comparisonYear, 0, 1, 0, 0, 0, 0);
+  const comparisonEnd = new Date(comparisonYear + 1, 0, 1, 0, 0, 0, 0);
+
+  const rawSeasonalStart = addDays_(center, -settings.seasonalWindowDays);
+  const rawSeasonalEnd = addDays_(center, settings.seasonalWindowDays + 1);
+
+  const seasonalStart = new Date(
+    Math.max(rawSeasonalStart.getTime(), comparisonStart.getTime())
+  );
+  const seasonalEnd = new Date(
+    Math.min(rawSeasonalEnd.getTime(), comparisonEnd.getTime())
+  );
 
   return {
+    comparisonYear,
     seasonalStart,
     seasonalEnd,
     comparisonStart,
