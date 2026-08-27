@@ -23,10 +23,19 @@ function recordCooccurrenceActivity_(stat, actorIds, allowedActorIds, dayKey) {
 
   (actorIds || []).forEach((actorId) => {
     if (!allowedActorIds.has(actorId)) return;
-    if (!stat.actorActivityDayMap[actorId]) {
-      stat.actorActivityDayMap[actorId] = new Set();
+
+    // 単一ユーザー運用で people/me が返る場合は、実Actor IDと同一人物としてまとめる。
+    // 複数ユーザー時は誤帰属を避けるため people/me のまま保持する。
+    let actorKey = actorId;
+    if (actorId === 'people/me' && allowedActorIds.has('people/me')) {
+      const canonicalIds = Array.from(allowedActorIds).filter((id) => id !== 'people/me');
+      if (canonicalIds.length === 1) actorKey = canonicalIds[0];
     }
-    stat.actorActivityDayMap[actorId].add(dayKey);
+
+    if (!stat.actorActivityDayMap[actorKey]) {
+      stat.actorActivityDayMap[actorKey] = new Set();
+    }
+    stat.actorActivityDayMap[actorKey].add(dayKey);
   });
 }
 
@@ -34,62 +43,66 @@ function attachCooccurrenceRelations_(recommendations, seasonalityStats, windows
   const items = recommendations || [];
   if (items.length === 0) return items;
 
-  const relationsByFileId = new Map();
-  items.forEach((item) => relationsByFileId.set(item.fileId, []));
-
-  for (let i = 0; i < items.length; i += 1) {
-    for (let j = i + 1; j < items.length; j += 1) {
-      const a = items[i];
-      const b = items[j];
-      const statA = seasonalityStats[a.fileId];
-      const statB = seasonalityStats[b.fileId];
-      if (!statA || !statB) continue;
-
-      const metric = calculateCooccurrenceMetric_(statA, statB, windows);
-      if (!metric) continue;
-      if (metric.matchedPairs < REINEN_COOCCURRENCE_MIN_MATCHES) continue;
-      if (metric.score < REINEN_COOCCURRENCE_MIN_SCORE) continue;
-
-      relationsByFileId.get(a.fileId).push({
-        fileId: b.fileId,
-        title: b.title,
-        url: b.url,
-        score: metric.score,
-        weightedJaccard: metric.weightedJaccard,
-        lift: metric.lift,
-        matchedPairs: metric.matchedPairs,
-        averageGapDays: metric.averageGapDays,
-        directionalCoverage: metric.coverageAtoB,
-      });
-
-      relationsByFileId.get(b.fileId).push({
-        fileId: a.fileId,
-        title: a.title,
-        url: a.url,
-        score: metric.score,
-        weightedJaccard: metric.weightedJaccard,
-        lift: metric.lift,
-        matchedPairs: metric.matchedPairs,
-        averageGapDays: metric.averageGapDays,
-        directionalCoverage: metric.coverageBtoA,
-      });
-    }
-  }
+  // 関連先は最終推薦だけに限定しない。
+  // 季節ウィンドウで最低活動量を満たして年度履歴まで取得済みの候補全体と比較する。
+  const candidateStats = Object.values(seasonalityStats || {});
+  const metricCache = new Map();
 
   return items.map((item) => {
-    const relatedFiles = (relationsByFileId.get(item.fileId) || [])
-      .sort((a, b) =>
-        b.score - a.score ||
-        b.matchedPairs - a.matchedPairs ||
-        a.averageGapDays - b.averageGapDays
-      )
-      .slice(0, REINEN_COOCCURRENCE_MAX_RELATED);
+    const statA = seasonalityStats[item.fileId];
+    const relatedFiles = [];
 
-    const top = relatedFiles[0] || null;
+    if (statA) {
+      candidateStats.forEach((statB) => {
+        if (!statB || statB.fileId === item.fileId) return;
+
+        const cacheKey = [item.fileId, statB.fileId].sort().join('|');
+        let cached = metricCache.get(cacheKey);
+        if (!cached) {
+          const firstId = item.fileId < statB.fileId ? item.fileId : statB.fileId;
+          const firstStat = seasonalityStats[firstId];
+          const secondStat = firstId === item.fileId ? statB : statA;
+          cached = {
+            firstId,
+            metric: calculateCooccurrenceMetric_(firstStat, secondStat, windows),
+          };
+          metricCache.set(cacheKey, cached);
+        }
+
+        const metric = cached.metric;
+        if (!metric) return;
+        if (metric.matchedPairs < REINEN_COOCCURRENCE_MIN_MATCHES) return;
+        if (metric.score < REINEN_COOCCURRENCE_MIN_SCORE) return;
+
+        const itemIsFirst = cached.firstId === item.fileId;
+        relatedFiles.push({
+          fileId: statB.fileId,
+          title: statB.title || '(無題)',
+          url: `https://drive.google.com/open?id=${encodeURIComponent(statB.fileId)}`,
+          score: metric.score,
+          weightedJaccard: metric.weightedJaccard,
+          lift: metric.lift,
+          matchedPairs: metric.matchedPairs,
+          averageGapDays: metric.averageGapDays,
+          directionalCoverage: itemIsFirst
+            ? metric.coverageAtoB
+            : metric.coverageBtoA,
+        });
+      });
+    }
+
+    relatedFiles.sort((a, b) =>
+      b.score - a.score ||
+      b.matchedPairs - a.matchedPairs ||
+      a.averageGapDays - b.averageGapDays
+    );
+    const topRelated = relatedFiles.slice(0, REINEN_COOCCURRENCE_MAX_RELATED);
+    const top = topRelated[0] || null;
+
     return {
       ...item,
-      relatedFiles,
-      relatedFileSummary: formatRelatedFileSummary_(relatedFiles),
+      relatedFiles: topRelated,
+      relatedFileSummary: formatRelatedFileSummary_(topRelated),
       cooccurrenceScore: top ? top.score : 0,
       cooccurrenceMatches: top ? top.matchedPairs : 0,
       cooccurrenceLift: top ? top.lift : 0,
@@ -99,8 +112,8 @@ function attachCooccurrenceRelations_(recommendations, seasonalityStats, windows
 }
 
 function calculateCooccurrenceMetric_(statA, statB, windows) {
-  const mapA = statA.actorActivityDayMap || {};
-  const mapB = statB.actorActivityDayMap || {};
+  const mapA = getCooccurrenceDayNumberMap_(statA);
+  const mapB = getCooccurrenceDayNumberMap_(statB);
   const sharedActors = Object.keys(mapA).filter((actorId) => mapB[actorId]);
   if (sharedActors.length === 0) return null;
 
@@ -122,8 +135,8 @@ function calculateCooccurrenceMetric_(statA, statB, windows) {
   const fiscalEndDayExclusive = dateToDayNumber_(windows.comparisonEnd);
 
   sharedActors.forEach((actorId) => {
-    const daysA = setToSortedDayNumbers_(mapA[actorId]);
-    const daysB = setToSortedDayNumbers_(mapB[actorId]);
+    const daysA = mapA[actorId];
+    const daysB = mapB[actorId];
     if (daysA.length === 0 || daysB.length === 0) return;
 
     supportA += daysA.length;
@@ -201,6 +214,21 @@ function calculateCooccurrenceMetric_(statA, statB, windows) {
   };
 }
 
+function getCooccurrenceDayNumberMap_(stat) {
+  if (stat._cooccurrenceDayNumberMap) return stat._cooccurrenceDayNumberMap;
+
+  const result = {};
+  const source = stat.actorActivityDayMap || {};
+  Object.keys(source).forEach((actorId) => {
+    result[actorId] = Array.from(source[actorId] || [])
+      .map((dayKey) => dateKeyToDayNumber_(dayKey))
+      .filter((value) => Number.isFinite(value))
+      .sort((a, b) => a - b);
+  });
+  stat._cooccurrenceDayNumberMap = result;
+  return result;
+}
+
 function greedyNearDayPairs_(daysA, daysB, windowDays) {
   const pairs = [];
   let i = 0;
@@ -237,24 +265,39 @@ function countDaysWithNeighbor_(sourceDays, targetDays, windowDays) {
 }
 
 function expandedDayCoverage_(days, windowDays, startDay, endDayExclusive) {
-  const covered = new Set();
+  if (!days || days.length === 0) return 0;
+
+  let total = 0;
+  let currentStart = null;
+  let currentEnd = null;
+
   days.forEach((day) => {
     const from = Math.max(startDay, day - windowDays);
     const to = Math.min(endDayExclusive - 1, day + windowDays);
-    for (let value = from; value <= to; value += 1) covered.add(value);
+    if (from > to) return;
+
+    if (currentStart === null) {
+      currentStart = from;
+      currentEnd = to;
+      return;
+    }
+
+    if (from <= currentEnd + 1) {
+      currentEnd = Math.max(currentEnd, to);
+      return;
+    }
+
+    total += currentEnd - currentStart + 1;
+    currentStart = from;
+    currentEnd = to;
   });
-  return covered.size;
+
+  if (currentStart !== null) total += currentEnd - currentStart + 1;
+  return total;
 }
 
 function temporalWeight_(gapDays) {
   return Math.pow(0.5, gapDays / REINEN_COOCCURRENCE_HALF_LIFE_DAYS);
-}
-
-function setToSortedDayNumbers_(value) {
-  return Array.from(value || [])
-    .map((dayKey) => dateKeyToDayNumber_(dayKey))
-    .filter((value) => Number.isFinite(value))
-    .sort((a, b) => a - b);
 }
 
 function dateKeyToDayNumber_(dayKey) {
