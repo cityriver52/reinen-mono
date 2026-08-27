@@ -9,6 +9,7 @@
 - 主語は **業務ファイル**。個人の閲覧履歴を長期蓄積しない。
 - UXは **静かなPush**。recallよりprecisionを優先する。
 - 単なる昨年利用ではなく、**年度内での季節的な偏り**を検出する。
+- 共起は季節性とは別の説明軸として扱い、季節性scoreへ混ぜない。
 - ユーザー入力と内部データを分離する。
 - 日常運用でApps Scriptのソースファイルを開かせない。**Config + カスタムメニュー**を操作面とする。
 - 配布先ごとに変わる値は、Project SettingsではなくConfigで編集できるようにする。
@@ -25,6 +26,7 @@
 - User resolution: People API directory search
 - Identity: Drive File ID
 - Primary UX: Google Chat weekly cards
+- Related-file analysis: `Cooccurrence.gs`
 
 ## Sheet responsibilities
 
@@ -57,6 +59,15 @@
 内部生成データのみ。Row 1 は machine-oriented headers。タイトル、キャッチコピー、説明ブロックは置かない。
 
 `folder_path` にはファイル直上フォルダだけでなく、Driveルートからの階層を保存する。
+
+共起情報として次を保存する。
+
+- `related_files`
+- `cooccurrence_score`
+- `cooccurrence_matches`
+- `cooccurrence_lift`
+- `cooccurrence_avg_gap_days`
+- `related_file_ids`
 
 ### State
 
@@ -157,6 +168,23 @@ score = base * min(seasonal_lift, 5)
 
 4月初旬・3月末付近では季節ウィンドウを比較対象年度内にクリップする。
 
+## Co-occurrence / related files
+
+「一緒に使う」は、季節性候補の年度内EDIT履歴を再利用して計算する。追加のDrive Activity API照会を増やさない。
+
+- 同じactorが編集した活動日同士だけを比較する。
+- 7日以内を近接とする。
+- 時間差は半減期3日で減衰する。
+- 時間重み付きJaccardで活動量を正規化する。
+- 年中頻繁に動くファイルとの偶然の近接はLiftで減点する。
+- 近接2回以上、共起score 0.08以上だけ採用する。
+- 各ファイル上位3件まで表示する。
+- 関連先は最終推薦だけに限定せず、年度履歴取得済みの季節候補全体から探す。
+
+詳細は `docs/COOCCURRENCE.md`。
+
+**共起scoreを季節性scoreに加算・乗算しない。** 「そろそろ使う」と「一緒に使う」は説明上も別の理由として保つ。
+
 ## Folder hierarchy
 
 候補に絞った後で Drive parent hierarchy をルートまで解決する。全履歴ファイルへ階層取得を行ってAPI負荷を増やさない。
@@ -192,3 +220,5 @@ Drive Activity queryではActorを直接指定できないため、folder/time/a
 11. Year-round frequently used files should normally be filtered out rather than ranked highly.
 12. The comparison period is fiscal year (Apr 1–Mar 31), not calendar year or rolling 365 days.
 13. Do not make editor-based function execution part of normal user operations.
+14. Keep co-occurrence explainable and separate from the main seasonal ranking.
+15. Co-occurrence must reuse already-fetched candidate history unless there is a concrete product reason to spend additional Drive Activity API quota.
