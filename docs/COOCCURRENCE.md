@@ -78,10 +78,10 @@ pair_lift = sqrt(lift_A_to_B * lift_B_to_A)
 
 ```text
 cooccurrence_score
-  = weighted_jaccard * min(max(pair_lift, 1), 3)
+  = weighted_jaccard * min(max(pair_lift, 0), 3)
 ```
 
-Liftが極端に大きくなっても最大3倍までに抑え、Jaccardを主役にする。
+Liftが1未満なら、通年・高頻度ファイルとの偶然の近接を減点する。Liftが極端に大きくなっても最大3倍までに抑え、Jaccardを主役にする。
 
 ## 採用条件
 
