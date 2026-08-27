@@ -104,22 +104,14 @@ function runWeeklyReinenDigest() {
     )
     .slice(0, ux.maxOverdueAlertsPerRun);
 
-  const upcoming = eligible
-    .filter(
-      (item) =>
-        item.daysUntilExpectedStart >= 0 &&
-        item.daysUntilExpectedStart <= ux.upcomingDays
-    )
-    .sort(
-      (a, b) =>
-        a.daysUntilExpectedStart - b.daysUntilExpectedStart ||
-        b.score - a.score
-    )
-    .slice(0, ux.weeklyMaxItems);
+  const weeklySelection = selectWeeklyReinenItems_(eligible, ux);
+  const upcoming = weeklySelection.items;
 
   const result = {
     totalCandidates: recommendations.length,
     weeklyItems: upcoming.length,
+    nearTermItems: weeklySelection.nearTerm.length,
+    lookaheadItems: weeklySelection.lookahead.length,
     overdueAlerts: 0,
     chatConfigured: Boolean(ux.chatWebhookUrl),
   };
@@ -144,6 +136,51 @@ function runWeeklyReinenDigest() {
 
   console.log(JSON.stringify(result, null, 2));
   return result;
+}
+
+/**
+ * 週次Chatの通常枠は最大3件。
+ *
+ * - 0〜7日後: score降順で最大2件
+ * - 8〜UPCOMING_DAYS日後（通常21日）: score降順で最大1件
+ * - score同点時だけ開始時期が近い方を優先
+ * - 過去にChatへ表示したかどうかは順位に影響させない
+ *
+ * 重要な案件が条件に残っていれば、翌週も再表示される。
+ */
+function selectWeeklyReinenItems_(eligible, ux) {
+  const compareByScoreThenTiming = (a, b) =>
+    b.score - a.score ||
+    a.daysUntilExpectedStart - b.daysUntilExpectedStart;
+
+  const maxItems = Math.min(Math.max(Number(ux.weeklyMaxItems || 3), 0), 3);
+  const nearTermLimit = Math.min(2, maxItems);
+  const lookaheadLimit = maxItems >= 3 ? 1 : 0;
+  const lookaheadEnd = Math.max(8, Number(ux.upcomingDays || 21));
+
+  const nearTerm = eligible
+    .filter(
+      (item) =>
+        item.daysUntilExpectedStart >= 0 &&
+        item.daysUntilExpectedStart <= 7
+    )
+    .sort(compareByScoreThenTiming)
+    .slice(0, nearTermLimit);
+
+  const lookahead = eligible
+    .filter(
+      (item) =>
+        item.daysUntilExpectedStart >= 8 &&
+        item.daysUntilExpectedStart <= lookaheadEnd
+    )
+    .sort(compareByScoreThenTiming)
+    .slice(0, lookaheadLimit);
+
+  return {
+    nearTerm,
+    lookahead,
+    items: nearTerm.concat(lookahead),
+  };
 }
 
 function sendTestReinenNotification() {
