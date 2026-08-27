@@ -226,6 +226,7 @@ function querySeasonalWindowForFolder_(
         actorIds.forEach((id) => {
           if (allowedActorIds.has(id)) stat.actorIdSet.add(id);
         });
+        recordCooccurrenceActivity_(stat, actorIds, allowedActorIds, dayKey);
         if (item.title) stat.title = item.title;
 
         if (!stat.seasonalFirstActivity || activityTime < stat.seasonalFirstActivity) {
@@ -250,6 +251,7 @@ function createEmptySeasonalityStat_(fileId, title) {
     seasonalEditActivities: 0,
     seasonalActiveDaySet: new Set(),
     actorIdSet: new Set(),
+    actorActivityDayMap: {},
     folderIdSet: new Set(),
     seasonalFirstActivity: null,
     seasonalLastActivity: null,
@@ -507,6 +509,7 @@ function processBackgroundActivities_(stat, activities, allowedActorIds, windows
     actorIds.forEach((id) => {
       if (allowedActorIds.has(id)) stat.actorIdSet.add(id);
     });
+    recordCooccurrenceActivity_(stat, actorIds, allowedActorIds, dayKey);
   }
 }
 
@@ -563,7 +566,7 @@ function buildRecommendations_(seasonalityStats, now, windows, settings) {
     });
   });
 
-  return recommendations;
+  return attachCooccurrenceRelations_(recommendations, seasonalityStats, windows);
 }
 
 function finalizeSeasonalityStats_(stat, windows) {
@@ -724,6 +727,12 @@ function writeDataSheet_(spreadsheet, recommendations, generatedAt) {
     'matched_folder_ids',
     'matched_actor_ids',
     'generated_at',
+    'related_files',
+    'cooccurrence_score',
+    'cooccurrence_matches',
+    'cooccurrence_lift',
+    'cooccurrence_avg_gap_days',
+    'related_file_ids',
   ];
 
   if (sheet.getMaxColumns() < headers.length) {
@@ -759,6 +768,14 @@ function writeDataSheet_(spreadsheet, recommendations, generatedAt) {
       item.folderIds.join(','),
       item.actorIds.join(','),
       generatedAt,
+      item.relatedFileSummary || '',
+      item.cooccurrenceScore || 0,
+      item.cooccurrenceMatches || 0,
+      item.cooccurrenceLift || 0,
+      item.cooccurrenceAverageGapDays === null || item.cooccurrenceAverageGapDays === undefined
+        ? ''
+        : item.cooccurrenceAverageGapDays,
+      (item.relatedFiles || []).map((related) => related.fileId).join(','),
     ]);
 
     sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
@@ -766,12 +783,16 @@ function writeDataSheet_(spreadsheet, recommendations, generatedAt) {
     sheet.getRange(2, 9, rows.length, 1).setNumberFormat('0.0%');
     sheet.getRange(2, 10, rows.length, 3).setNumberFormat('yyyy-mm-dd hh:mm');
     sheet.getRange(2, 18, rows.length, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+    sheet.getRange(2, 20, rows.length, 1).setNumberFormat('0.000');
+    sheet.getRange(2, 22, rows.length, 1).setNumberFormat('0.00');
+    sheet.getRange(2, 23, rows.length, 1).setNumberFormat('0.0');
     sheet.getRange(1, 1, rows.length + 1, headers.length).createFilter();
   }
 
   sheet.setFrozenRows(1);
   sheet.setColumnWidth(2, 300);
   sheet.setColumnWidth(3, 440);
+  sheet.setColumnWidth(19, 440);
 }
 
 function buildWindows_(now, settings) {
