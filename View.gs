@@ -6,7 +6,7 @@
  */
 const REINEN_VIEW_SHEET_NAME = 'View';
 const REINEN_VIEW_MAX_ROWS = 50;
-const REINEN_VIEW_VERSION = '2';
+const REINEN_VIEW_VERSION = '3';
 
 function getReinenViewUrl_(spreadsheet) {
   const sheet = ensureReinenViewSheet_(spreadsheet);
@@ -37,19 +37,19 @@ function initializeReinenViewSheet_(sheet) {
   sheet.clear();
   sheet.clearConditionalFormatRules();
 
-  sheet.getRange('A1:F1').merge();
+  sheet.getRange('A1:G1').merge();
   sheet.getRange('A1')
     .setValue('Re:年モノ')
     .setFontSize(16)
     .setFontWeight('bold');
 
-  sheet.getRange('A2:F2').merge();
+  sheet.getRange('A2:G2').merge();
   sheet.getRange('A2')
-    .setValue('開始目安が近い順です。重要度は、この一覧内のスコアを5段階で相対表示しています。')
+    .setValue('開始目安が近い順です。重要度は、この一覧内のスコアを5段階で相対表示しています。「一緒に使う」は昨年度の近接編集パターンから抽出しています。')
     .setFontColor('#5f6368');
 
-  sheet.getRange('A4:F4')
-    .setValues([['開始目安', '重要度', 'ファイル', 'フォルダ', '昨年の編集', '通知状態']])
+  sheet.getRange('A4:G4')
+    .setValues([['開始目安', '重要度', 'ファイル', 'フォルダ', '昨年の編集', '一緒に使う', '通知状態']])
     .setFontWeight('bold')
     .setBackground('#eeeeee');
 
@@ -67,10 +67,11 @@ function initializeReinenViewSheet_(sheet) {
       `=IF($I${viewRow}="","",HYPERLINK($U${viewRow},$I${viewRow}))`,
       `=IF($I${viewRow}="","",$J${viewRow})`,
       `=IF($I${viewRow}="","","昨年"&TEXT($Q${viewRow},"m月d日")&"～"&TEXT($R${viewRow},"m月d日")&"の間に"&$L${viewRow}&"回編集")`,
+      `=IF($I${viewRow}="","",IFERROR(INDEX(Data!S:S,MATCH($V${viewRow},Data!O:O,0)),""))`,
       `=IF($I${viewRow}="","",IF(COUNTIFS(State!A:A,$V${viewRow},State!C:C,YEAR(TODAY()),State!D:D,TRUE)>0,"今年は不要",IF(SUMIFS(State!E:E,State!A:A,$V${viewRow},State!C:C,YEAR(TODAY()))>NOW(),"あとで","通知対象")))`,
     ]);
   }
-  sheet.getRange(5, 1, REINEN_VIEW_MAX_ROWS, 6).setFormulas(formulas);
+  sheet.getRange(5, 1, REINEN_VIEW_MAX_ROWS, 7).setFormulas(formulas);
 
   sheet.getRange('Z1').setValue(REINEN_VIEW_VERSION);
 
@@ -80,18 +81,19 @@ function initializeReinenViewSheet_(sheet) {
   sheet.setColumnWidth(3, 300);
   sheet.setColumnWidth(4, 420);
   sheet.setColumnWidth(5, 250);
-  sheet.setColumnWidth(6, 120);
-  sheet.getRange(`A4:F${4 + REINEN_VIEW_MAX_ROWS}`)
+  sheet.setColumnWidth(6, 360);
+  sheet.setColumnWidth(7, 120);
+  sheet.getRange(`A4:G${4 + REINEN_VIEW_MAX_ROWS}`)
     .setVerticalAlignment('middle')
     .setWrap(true);
   sheet.getRange(`B5:B${4 + REINEN_VIEW_MAX_ROWS}`)
     .setFontColor('#5b78a6')
     .setHorizontalAlignment('center');
-  sheet.setRowHeights(5, REINEN_VIEW_MAX_ROWS, 52);
+  sheet.setRowHeights(5, REINEN_VIEW_MAX_ROWS, 68);
 
   const filter = sheet.getFilter();
   if (filter) filter.remove();
-  sheet.getRange(`A4:F${4 + REINEN_VIEW_MAX_ROWS}`).createFilter();
+  sheet.getRange(`A4:G${4 + REINEN_VIEW_MAX_ROWS}`).createFilter();
 
   // 内部ヘルパー列は利用者には見せない。
   sheet.hideColumns(8, 19); // H:Z
