@@ -185,8 +185,9 @@ function calculateCooccurrenceMetric_(statA, statB, windows) {
   const liftBtoA = expectedRateB > 0 ? coverageBtoA / expectedRateB : 1;
   const lift = Math.sqrt(Math.max(liftAtoB, 0) * Math.max(liftBtoA, 0));
 
-  // Liftは暴れやすいので最大3倍まで。Jaccardを主役にして説明可能性を保つ。
-  const score = weightedJaccard * Math.min(Math.max(lift, 1), 3);
+  // Lift < 1 は通年・高頻度ファイルの偶然の近接を抑制する。
+  // Lift > 3 は暴れやすいため上限を設け、Jaccardを主役にする。
+  const score = weightedJaccard * Math.min(Math.max(lift, 0), 3);
 
   return {
     score,
