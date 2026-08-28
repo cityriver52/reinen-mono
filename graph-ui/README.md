@@ -93,7 +93,7 @@ edge_score = weighted_jaccard * clamp(lift, 0, 3)
 
 Graph payloadは`GraphCache`へJSONを分割保存し、24時間再利用します。
 
-Configの対象フォルダ・対象ユーザー・比較年度が変わるとSHA-256 fingerprintが変わるため、自動的にキャッシュを無効化します。
+Configの対象フォルダ・対象ユーザー・比較年度が変わるとSHA-256 fingerprintが変わるため、自動的にキャッシュを無効化します。比較年度を空欄にしている場合も、4月の年度切替で実効年度が変われば自動的に無効化されます。
 
 Refreshボタンはキャッシュを無視して再計算します。
 
@@ -123,5 +123,7 @@ graph-ui/
 ├─ Web.gs          WebアプリAPI / Drive詳細
 ├─ Index.html      UIシェル
 ├─ Styles.html     UIスタイル
+├─ Layout.html     浮遊パネルのレイアウト補正
+├─ Refresh.html    再計算後の安全な再読込
 └─ App.html        Canvas描画・物理演算・操作
 ```
