@@ -1,5 +1,5 @@
-const GRAPH_SPREADSHEET_ID = '1AD8G5ugPDvlkQMZ4Pq3XWYlTT5nWjPxoS62xPGuYVZ4';
 const GRAPH_TIME_ZONE = 'Asia/Tokyo';
+const GRAPH_SPREADSHEET_PROPERTY = 'GRAPH_SPREADSHEET_ID';
 
 const GRAPH_SETTINGS = Object.freeze({
   configSheet: 'Config',
@@ -21,8 +21,106 @@ const GRAPH_SETTINGS = Object.freeze({
   cacheChunkChars: 45000,
 });
 
+/**
+ * コンテナバインド先のスプレッドシートをGraph UIへ登録する。
+ * コピー先ごとにIDが変わるため、固定IDは持たない。
+ */
+function setupGraphProject() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    throw new Error(
+      'この関数はRe:年モノ Graphのスプレッドシートから実行してください。'
+    );
+  }
+
+  PropertiesService.getScriptProperties().setProperty(
+    GRAPH_SPREADSHEET_PROPERTY,
+    ss.getId()
+  );
+
+  const runtime = readGraphRuntimeConfig_();
+  clearGraphCache_();
+  SpreadsheetApp.flush();
+
+  const message =
+    `接続しました。対象フォルダ ${runtime.folders.length}件 / ` +
+    `対象ユーザー ${runtime.users.length}人 / ${runtime.fiscalYear}年度`;
+  ss.toast(message, 'Re:年モノ Graph', 6);
+  return message;
+}
+
+/** Configだけを再検証し、B/D列の自動欄を更新する。 */
+function refreshGraphConfig() {
+  const runtime = readGraphRuntimeConfig_();
+  clearGraphCache_();
+  SpreadsheetApp.flush();
+  const message =
+    `Configを更新しました。対象フォルダ ${runtime.folders.length}件 / ` +
+    `対象ユーザー ${runtime.users.length}人 / ${runtime.fiscalYear}年度`;
+  runtime.spreadsheet.toast(message, 'Re:年モノ Graph', 6);
+  return message;
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Re:年モノ Graph')
+    .addItem('① このスプシをGraphに接続', 'menuSetupGraphProject')
+    .addItem('② Configを検証・自動欄を更新', 'menuRefreshGraphConfig')
+    .addToUi();
+}
+
+function menuSetupGraphProject() {
+  try {
+    setupGraphProject();
+  } catch (error) {
+    SpreadsheetApp.getUi().alert(
+      'Re:年モノ Graph',
+      String(error && error.message ? error.message : error),
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    throw error;
+  }
+}
+
+function menuRefreshGraphConfig() {
+  try {
+    refreshGraphConfig();
+  } catch (error) {
+    SpreadsheetApp.getUi().alert(
+      'Re:年モノ Graph',
+      String(error && error.message ? error.message : error),
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    throw error;
+  }
+}
+
 function getGraphSpreadsheet_() {
-  return SpreadsheetApp.openById(GRAPH_SPREADSHEET_ID);
+  const props = PropertiesService.getScriptProperties();
+  const storedId = String(props.getProperty(GRAPH_SPREADSHEET_PROPERTY) || '').trim();
+  if (storedId) {
+    try {
+      return SpreadsheetApp.openById(storedId);
+    } catch (error) {
+      throw new Error(
+        '登録済みのGraphスプレッドシートを開けません。' +
+        'スプレッドシートの「Re:年モノ Graph > ① このスプシをGraphに接続」を再実行してください。'
+      );
+    }
+  }
+
+  // スプレッドシート上のメニューやエディタから実行された場合は、その場で自己登録する。
+  const active = SpreadsheetApp.getActiveSpreadsheet();
+  if (active) {
+    props.setProperty(GRAPH_SPREADSHEET_PROPERTY, active.getId());
+    return active;
+  }
+
+  // Webアプリ実行時はactive spreadsheetがないため、初回登録が必要。
+  throw new Error(
+    'Graphのスプレッドシートが未登録です。' +
+    'スプレッドシートを開き、「Re:年モノ Graph > ① このスプシをGraphに接続」を一度実行してください。'
+  );
 }
 
 function readGraphRuntimeConfig_() {
@@ -42,7 +140,9 @@ function readGraphRuntimeConfig_() {
     .map((row) => normalizeGraphEmail_(row[2]))
     .filter(Boolean);
 
-  const fiscalYearRaw = String(sheet.getRange(GRAPH_SETTINGS.fiscalYearCell).getDisplayValue() || '').trim();
+  const fiscalYearRaw = String(
+    sheet.getRange(GRAPH_SETTINGS.fiscalYearCell).getDisplayValue() || ''
+  ).trim();
   const fiscalYear = fiscalYearRaw
     ? parseGraphFiscalYear_(fiscalYearRaw)
     : defaultGraphFiscalYear_();
@@ -105,12 +205,24 @@ function writeResolvedGraphConfig_(sheet, folders, users) {
   rows.forEach((row) => {
     const folderInput = String(row[0] || '').trim();
     const email = normalizeGraphEmail_(row[2]);
-    folderNames.push([folderInput && folderMap.has(folderInput) ? folderMap.get(folderInput).name : '']);
-    userNames.push([email && userMap.has(email) ? userMap.get(email).displayName : '']);
+    folderNames.push([
+      folderInput && folderMap.has(folderInput)
+        ? folderMap.get(folderInput).name
+        : '',
+    ]);
+    userNames.push([
+      email && userMap.has(email)
+        ? userMap.get(email).displayName
+        : '',
+    ]);
   });
 
-  sheet.getRange(GRAPH_SETTINGS.folderFirstRow, 2, rowCount, 1).setValues(folderNames);
-  sheet.getRange(GRAPH_SETTINGS.userFirstRow, 4, rowCount, 1).setValues(userNames);
+  sheet
+    .getRange(GRAPH_SETTINGS.folderFirstRow, 2, rowCount, 1)
+    .setValues(folderNames);
+  sheet
+    .getRange(GRAPH_SETTINGS.userFirstRow, 4, rowCount, 1)
+    .setValues(userNames);
 }
 
 function resolveGraphPersonByEmail_(email) {
@@ -123,12 +235,17 @@ function resolveGraphPersonByEmail_(email) {
       pageSize: 20,
     });
   } catch (error) {
-    throw new Error('People APIでユーザーを検索できません。People APIとdirectory.readonly権限を確認してください。');
+    throw new Error(
+      'People APIでユーザーを検索できません。' +
+      'People APIとdirectory.readonly権限を確認してください。'
+    );
   }
 
   const normalized = normalizeGraphEmail_(email);
   const exact = (response.people || []).find((person) =>
-    (person.emailAddresses || []).some((entry) => normalizeGraphEmail_(entry.value) === normalized)
+    (person.emailAddresses || []).some(
+      (entry) => normalizeGraphEmail_(entry.value) === normalized
+    )
   );
   if (!exact || !exact.resourceName) {
     throw new Error(`${email} を社内ディレクトリで特定できませんでした。`);
@@ -136,7 +253,10 @@ function resolveGraphPersonByEmail_(email) {
 
   return {
     resourceName: exact.resourceName,
-    displayName: exact.names && exact.names.length ? exact.names[0].displayName || '' : '',
+    displayName:
+      exact.names && exact.names.length
+        ? exact.names[0].displayName || ''
+        : '',
   };
 }
 
@@ -152,7 +272,9 @@ function extractGraphFolderId_(value) {
 
 function parseGraphFiscalYear_(value) {
   const match = String(value).match(/(20\d{2})/);
-  if (!match) throw new Error('比較年度は2025のような西暦年度で指定してください。');
+  if (!match) {
+    throw new Error('比較年度は2025のような西暦年度で指定してください。');
+  }
   return Number(match[1]);
 }
 
