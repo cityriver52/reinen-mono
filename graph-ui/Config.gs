@@ -78,7 +78,7 @@ function readGraphRuntimeConfig_() {
   const comparisonStart = makeGraphTokyoDate_(fiscalYear, 4, 1);
   const comparisonEnd = makeGraphTokyoDate_(fiscalYear + 1, 4, 1);
 
-  writeResolvedGraphConfig_(sheet, folders, users, fiscalYear);
+  writeResolvedGraphConfig_(sheet, folders, users);
 
   return {
     spreadsheet: ss,
@@ -92,7 +92,7 @@ function readGraphRuntimeConfig_() {
   };
 }
 
-function writeResolvedGraphConfig_(sheet, folders, users, fiscalYear) {
+function writeResolvedGraphConfig_(sheet, folders, users) {
   const rowCount = GRAPH_SETTINGS.folderLastRow - GRAPH_SETTINGS.folderFirstRow + 1;
   const folderMap = new Map(folders.map((item) => [item.input, item]));
   const userMap = new Map(users.map((item) => [item.email, item]));
@@ -111,9 +111,6 @@ function writeResolvedGraphConfig_(sheet, folders, users, fiscalYear) {
 
   sheet.getRange(GRAPH_SETTINGS.folderFirstRow, 2, rowCount, 1).setValues(folderNames);
   sheet.getRange(GRAPH_SETTINGS.userFirstRow, 4, rowCount, 1).setValues(userNames);
-  if (!String(sheet.getRange(GRAPH_SETTINGS.fiscalYearCell).getDisplayValue() || '').trim()) {
-    sheet.getRange(GRAPH_SETTINGS.fiscalYearCell).setValue(fiscalYear);
-  }
 }
 
 function resolveGraphPersonByEmail_(email) {
