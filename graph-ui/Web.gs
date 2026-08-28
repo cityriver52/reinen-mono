@@ -51,6 +51,14 @@ function getGraphConfigFingerprint_() {
     .getRange(GRAPH_SETTINGS.folderFirstRow, 1, rowCount, 5)
     .getDisplayValues();
   const relevant = rows.map((row) => [row[0], row[2], row[4]]);
+
+  // E4が空欄でも、4月の年度切替でキャッシュを確実に無効化する。
+  const fiscalYearRaw = String((rows[0] && rows[0][4]) || '').trim();
+  const effectiveFiscalYear = fiscalYearRaw
+    ? parseGraphFiscalYear_(fiscalYearRaw)
+    : defaultGraphFiscalYear_();
+  relevant.push(['effectiveFiscalYear', String(effectiveFiscalYear)]);
+
   const bytes = Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256,
     JSON.stringify(relevant),
