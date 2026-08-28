@@ -1,0 +1,639 @@
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('graphCanvas');
+  const ctx = canvas.getContext('2d');
+  const searchInput = document.getElementById('searchInput');
+  const searchResults = document.getElementById('searchResults');
+  const fitButton = document.getElementById('fitButton');
+  const refreshButton = document.getElementById('refreshButton');
+  const thresholdSlider = document.getElementById('thresholdSlider');
+  const thresholdValue = document.getElementById('thresholdValue');
+  const graphStats = document.getElementById('graphStats');
+  const detailPanel = document.getElementById('detailPanel');
+  const closeDetailButton = document.getElementById('closeDetailButton');
+  const detailTitle = document.getElementById('detailTitle');
+  const detailPath = document.getElementById('detailPath');
+  const detailDegree = document.getElementById('detailDegree');
+  const detailActiveDays = document.getElementById('detailActiveDays');
+  const detailEdits = document.getElementById('detailEdits');
+  const openDriveButton = document.getElementById('openDriveButton');
+  const neighborList = document.getElementById('neighborList');
+  const hoverTip = document.getElementById('hoverTip');
+  const loadingState = document.getElementById('loadingState');
+  const loadingTitle = document.getElementById('loadingTitle');
+  const loadingSub = document.getElementById('loadingSub');
+  const emptyState = document.getElementById('emptyState');
+  const emptyTitle = document.getElementById('emptyTitle');
+  const emptyMessage = document.getElementById('emptyMessage');
+
+  const palette = [
+    '#b9a6ff', '#8eb8ff', '#78c8b7', '#d9a6d0', '#e1b987',
+    '#95c983', '#89c4d8', '#d0a7ff', '#c7bd8e', '#e39ba5',
+  ];
+
+  const state = {
+    payload: null,
+    nodes: [],
+    edges: [],
+    visibleEdges: [],
+    nodeById: new Map(),
+    adjacency: new Map(),
+    selectedId: null,
+    hoverId: null,
+    dragNode: null,
+    panning: false,
+    pointerDown: null,
+    lastPointer: null,
+    camera: { cx: 0, cy: 0, scale: 1 },
+    width: 0,
+    height: 0,
+    dpr: 1,
+    simulationFrames: 0,
+    simulationActive: false,
+    thresholdScore: -Infinity,
+  };
+
+  function resizeCanvas() {
+    const rect = canvas.getBoundingClientRect();
+    state.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    state.width = Math.max(1, rect.width);
+    state.height = Math.max(1, rect.height);
+    canvas.width = Math.round(state.width * state.dpr);
+    canvas.height = Math.round(state.height * state.dpr);
+    ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+    render();
+  }
+
+  function hashNumber(text) {
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function initializeGraph(payload) {
+    state.payload = payload;
+    state.nodeById.clear();
+    state.adjacency.clear();
+    state.selectedId = null;
+    state.hoverId = null;
+    detailPanel.classList.remove('visible');
+
+    const count = Math.max(payload.nodes.length, 1);
+    state.nodes = payload.nodes.map((item, index) => {
+      const seed = hashNumber(item.id);
+      const angle = (Math.PI * 2 * index / count) + ((seed % 1000) / 1000 - .5) * .7;
+      const ring = 80 + Math.sqrt((index + 1) / count) * 360;
+      const node = {
+        ...item,
+        x: Math.cos(angle) * ring + ((seed >>> 8) % 80 - 40),
+        y: Math.sin(angle) * ring + ((seed >>> 16) % 80 - 40),
+        vx: 0,
+        vy: 0,
+        radius: Math.min(10, 3.1 + Math.log1p(item.activeDays) * 1.25 + Math.sqrt(item.degree) * .55),
+        color: palette[item.group % palette.length],
+      };
+      state.nodeById.set(node.id, node);
+      state.adjacency.set(node.id, []);
+      return node;
+    });
+
+    state.edges = payload.edges.map((item) => {
+      const edge = {
+        ...item,
+        sourceNode: state.nodeById.get(item.source),
+        targetNode: state.nodeById.get(item.target),
+      };
+      if (edge.sourceNode && edge.targetNode) {
+        state.adjacency.get(item.source).push({ node: edge.targetNode, edge });
+        state.adjacency.get(item.target).push({ node: edge.sourceNode, edge });
+      }
+      return edge;
+    }).filter((edge) => edge.sourceNode && edge.targetNode);
+
+    thresholdSlider.value = '0';
+    applyThreshold();
+    state.simulationFrames = 0;
+    state.simulationActive = true;
+    fitGraph(false);
+    hideLoading();
+    emptyState.classList.toggle('hidden', state.nodes.length > 0);
+    if (!state.nodes.length) {
+      emptyTitle.textContent = '表示できる関係がありません';
+      emptyMessage.textContent = 'この年度には設定した条件を満たすファイル関係が見つかりませんでした。';
+    }
+    requestAnimationFrame(tick);
+  }
+
+  function applyThreshold() {
+    const percentile = Number(thresholdSlider.value || 0);
+    if (!state.edges.length || percentile <= 0) {
+      state.thresholdScore = -Infinity;
+      state.visibleEdges = state.edges.slice();
+      thresholdValue.textContent = 'すべて';
+    } else {
+      const sorted = state.edges.map((edge) => edge.score).sort((a, b) => a - b);
+      const index = Math.min(sorted.length - 1, Math.floor((percentile / 100) * (sorted.length - 1)));
+      state.thresholdScore = sorted[index];
+      state.visibleEdges = state.edges.filter((edge) => edge.score >= state.thresholdScore);
+      thresholdValue.textContent = `上位${Math.max(1, 100 - percentile)}%`;
+    }
+    updateStats();
+    render();
+  }
+
+  function updateStats() {
+    if (!state.payload) {
+      graphStats.textContent = '読み込み中';
+      return;
+    }
+    graphStats.textContent = `${state.payload.fiscalYear}年度 · ${state.nodes.length} files · ${state.visibleEdges.length} / ${state.edges.length} links`;
+  }
+
+  function tick() {
+    if (state.simulationActive) simulateStep();
+    render();
+    requestAnimationFrame(tick);
+  }
+
+  function simulateStep() {
+    const nodes = state.nodes;
+    if (!nodes.length) {
+      state.simulationActive = false;
+      return;
+    }
+
+    for (let iteration = 0; iteration < 2; iteration += 1) {
+      for (let i = 0; i < nodes.length; i += 1) {
+        const a = nodes[i];
+        for (let j = i + 1; j < nodes.length; j += 1) {
+          const b = nodes[j];
+          let dx = b.x - a.x;
+          let dy = b.y - a.y;
+          let dist2 = dx * dx + dy * dy;
+          if (dist2 < .01) {
+            dx = ((hashNumber(a.id + b.id) % 100) / 100 - .5) * .2;
+            dy = ((hashNumber(b.id + a.id) % 100) / 100 - .5) * .2;
+            dist2 = dx * dx + dy * dy + .01;
+          }
+          const dist = Math.sqrt(dist2);
+          const repulse = Math.min(1.4, 1150 / (dist2 + 120));
+          const fx = repulse * dx / dist;
+          const fy = repulse * dy / dist;
+          a.vx -= fx;
+          a.vy -= fy;
+          b.vx += fx;
+          b.vy += fy;
+        }
+      }
+
+      state.edges.forEach((edge) => {
+        const a = edge.sourceNode;
+        const b = edge.targetNode;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const dist = Math.max(Math.sqrt(dx * dx + dy * dy), .1);
+        const target = 74 + Math.max(0, 35 - edge.score * 40);
+        const spring = (dist - target) * .0028 * (0.8 + Math.min(edge.score, 1.5));
+        const fx = spring * dx / dist;
+        const fy = spring * dy / dist;
+        a.vx += fx;
+        a.vy += fy;
+        b.vx -= fx;
+        b.vy -= fy;
+      });
+
+      nodes.forEach((node) => {
+        if (state.dragNode && state.dragNode.id === node.id) return;
+        node.vx += -node.x * .0007;
+        node.vy += -node.y * .0007;
+        node.vx *= .88;
+        node.vy *= .88;
+        const speed = Math.hypot(node.vx, node.vy);
+        if (speed > 7) {
+          node.vx = node.vx / speed * 7;
+          node.vy = node.vy / speed * 7;
+        }
+        node.x += node.vx;
+        node.y += node.vy;
+      });
+    }
+
+    state.simulationFrames += 1;
+    if (state.simulationFrames > 650) state.simulationActive = false;
+  }
+
+  function worldToScreen(x, y) {
+    return {
+      x: (x - state.camera.cx) * state.camera.scale + state.width / 2,
+      y: (y - state.camera.cy) * state.camera.scale + state.height / 2,
+    };
+  }
+
+  function screenToWorld(x, y) {
+    return {
+      x: (x - state.width / 2) / state.camera.scale + state.camera.cx,
+      y: (y - state.height / 2) / state.camera.scale + state.camera.cy,
+    };
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, state.width, state.height);
+    drawBackgroundDots();
+    if (!state.nodes.length) return;
+
+    const selectedNeighbors = state.selectedId
+      ? new Set((state.adjacency.get(state.selectedId) || []).map((entry) => entry.node.id))
+      : null;
+    if (selectedNeighbors) selectedNeighbors.add(state.selectedId);
+
+    const scores = state.edges.map((edge) => edge.score);
+    const minScore = scores.length ? Math.min(...scores) : 0;
+    const maxScore = scores.length ? Math.max(...scores) : 1;
+    const span = Math.max(maxScore - minScore, .0001);
+
+    state.visibleEdges.forEach((edge) => {
+      const a = worldToScreen(edge.sourceNode.x, edge.sourceNode.y);
+      const b = worldToScreen(edge.targetNode.x, edge.targetNode.y);
+      const normalized = (edge.score - minScore) / span;
+      const touchesSelected = state.selectedId && (edge.source === state.selectedId || edge.target === state.selectedId);
+      const touchesHover = state.hoverId && (edge.source === state.hoverId || edge.target === state.hoverId);
+
+      let alpha = .09 + normalized * .22;
+      if (state.selectedId) alpha = touchesSelected ? .62 : .025;
+      else if (state.hoverId) alpha = touchesHover ? .48 : alpha * .45;
+
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.strokeStyle = `rgba(177, 178, 190, ${alpha})`;
+      ctx.lineWidth = .55 + normalized * 1.55;
+      ctx.stroke();
+    });
+
+    state.nodes.forEach((node) => {
+      const p = worldToScreen(node.x, node.y);
+      const radius = Math.max(2.3, node.radius * Math.sqrt(Math.max(state.camera.scale, .22)));
+      const selected = node.id === state.selectedId;
+      const hovered = node.id === state.hoverId;
+      const related = !selectedNeighbors || selectedNeighbors.has(node.id);
+      let alpha = related ? .92 : .10;
+      if (state.selectedId && selected) alpha = 1;
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      if (selected || hovered) {
+        ctx.shadowBlur = selected ? 24 : 16;
+        ctx.shadowColor = node.color;
+      }
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = selected ? '#f5f2ff' : node.color;
+      ctx.fill();
+      if (selected) {
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = node.color;
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      const showLabel = selected || hovered || node.degree >= 4 || state.camera.scale > 1.12;
+      if (showLabel && related && radius > 2) {
+        ctx.save();
+        ctx.globalAlpha = selected || hovered ? 1 : .76;
+        ctx.font = `${selected ? 600 : 450} 10px Inter, system-ui, sans-serif`;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#e7e5eb';
+        const label = truncateLabel(node.label, selected ? 42 : 28);
+        ctx.fillText(label, p.x + radius + 6, p.y);
+        ctx.restore();
+      }
+    });
+  }
+
+  function drawBackgroundDots() {
+    const spacingWorld = 46;
+    const scale = state.camera.scale;
+    if (scale < .22) return;
+    const topLeft = screenToWorld(0, 0);
+    const bottomRight = screenToWorld(state.width, state.height);
+    const startX = Math.floor(topLeft.x / spacingWorld) * spacingWorld;
+    const startY = Math.floor(topLeft.y / spacingWorld) * spacingWorld;
+    const alpha = Math.min(.055, .018 + scale * .012);
+    ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+    for (let x = startX; x <= bottomRight.x; x += spacingWorld) {
+      for (let y = startY; y <= bottomRight.y; y += spacingWorld) {
+        const p = worldToScreen(x, y);
+        ctx.fillRect(p.x, p.y, 1, 1);
+      }
+    }
+  }
+
+  function truncateLabel(text, max) {
+    const value = String(text || '');
+    return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+  }
+
+  function findNodeAt(screenX, screenY) {
+    let best = null;
+    let bestDistance = Infinity;
+    state.nodes.forEach((node) => {
+      const p = worldToScreen(node.x, node.y);
+      const radius = Math.max(7, node.radius * Math.sqrt(Math.max(state.camera.scale, .22)) + 5);
+      const distance = Math.hypot(screenX - p.x, screenY - p.y);
+      if (distance <= radius && distance < bestDistance) {
+        best = node;
+        bestDistance = distance;
+      }
+    });
+    return best;
+  }
+
+  function canvasPoint(event) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+
+  canvas.addEventListener('pointerdown', (event) => {
+    canvas.setPointerCapture(event.pointerId);
+    const point = canvasPoint(event);
+    const node = findNodeAt(point.x, point.y);
+    state.pointerDown = { ...point, moved: 0, nodeId: node ? node.id : null };
+    state.lastPointer = point;
+    if (node) {
+      state.dragNode = node;
+      state.simulationActive = true;
+    } else {
+      state.panning = true;
+    }
+    canvas.classList.add('dragging');
+  });
+
+  canvas.addEventListener('pointermove', (event) => {
+    const point = canvasPoint(event);
+    if (state.pointerDown) {
+      state.pointerDown.moved += Math.hypot(point.x - state.lastPointer.x, point.y - state.lastPointer.y);
+    }
+
+    if (state.dragNode) {
+      const world = screenToWorld(point.x, point.y);
+      state.dragNode.x = world.x;
+      state.dragNode.y = world.y;
+      state.dragNode.vx = 0;
+      state.dragNode.vy = 0;
+      state.lastPointer = point;
+      return;
+    }
+
+    if (state.panning) {
+      const dx = point.x - state.lastPointer.x;
+      const dy = point.y - state.lastPointer.y;
+      state.camera.cx -= dx / state.camera.scale;
+      state.camera.cy -= dy / state.camera.scale;
+      state.lastPointer = point;
+      return;
+    }
+
+    const node = findNodeAt(point.x, point.y);
+    state.hoverId = node ? node.id : null;
+    updateHoverTip(node, point);
+  });
+
+  function endPointer(event) {
+    const point = canvasPoint(event);
+    const down = state.pointerDown;
+    const clickedNode = down && down.nodeId ? state.nodeById.get(down.nodeId) : null;
+    if (down && down.moved < 7) {
+      if (clickedNode) selectNode(clickedNode.id, false);
+      else clearSelection();
+    }
+    state.dragNode = null;
+    state.panning = false;
+    state.pointerDown = null;
+    state.lastPointer = point;
+    canvas.classList.remove('dragging');
+  }
+
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+
+  canvas.addEventListener('dblclick', (event) => {
+    const point = canvasPoint(event);
+    const node = findNodeAt(point.x, point.y);
+    if (node) window.open(node.url, '_blank', 'noopener');
+  });
+
+  canvas.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    const point = canvasPoint(event);
+    const worldBefore = screenToWorld(point.x, point.y);
+    const factor = Math.exp(-event.deltaY * .0012);
+    const nextScale = Math.min(4.8, Math.max(.16, state.camera.scale * factor));
+    state.camera.scale = nextScale;
+    state.camera.cx = worldBefore.x - (point.x - state.width / 2) / nextScale;
+    state.camera.cy = worldBefore.y - (point.y - state.height / 2) / nextScale;
+  }, { passive: false });
+
+  function updateHoverTip(node, point) {
+    if (!node || state.dragNode || state.panning) {
+      hoverTip.classList.remove('visible');
+      return;
+    }
+    hoverTip.textContent = node.label;
+    hoverTip.style.left = `${Math.min(state.width - 310, point.x + 13)}px`;
+    hoverTip.style.top = `${Math.min(state.height - 40, point.y + 13)}px`;
+    hoverTip.classList.add('visible');
+  }
+
+  function selectNode(id, focus) {
+    const node = state.nodeById.get(id);
+    if (!node) return;
+    state.selectedId = id;
+    detailTitle.textContent = node.label;
+    detailPath.textContent = 'フォルダを取得中…';
+    detailDegree.textContent = String(node.degree || 0);
+    detailActiveDays.textContent = String(node.activeDays || 0);
+    detailEdits.textContent = String(node.editActivities || 0);
+    openDriveButton.onclick = () => window.open(node.url, '_blank', 'noopener');
+    detailPanel.classList.add('visible');
+    populateNeighbors(id);
+    if (focus) focusNode(node);
+
+    google.script.run
+      .withSuccessHandler((details) => {
+        if (state.selectedId !== id) return;
+        detailPath.textContent = details.folderPath || 'フォルダ階層なし';
+        if (details.url) openDriveButton.onclick = () => window.open(details.url, '_blank', 'noopener');
+      })
+      .withFailureHandler(() => {
+        if (state.selectedId === id) detailPath.textContent = 'フォルダ階層を取得できません';
+      })
+      .getGraphNodeDetails(id);
+  }
+
+  function populateNeighbors(id) {
+    const entries = (state.adjacency.get(id) || [])
+      .slice()
+      .sort((a, b) => b.edge.score - a.edge.score || b.edge.matches - a.edge.matches)
+      .slice(0, 14);
+    neighborList.innerHTML = '';
+    if (!entries.length) {
+      const empty = document.createElement('div');
+      empty.className = 'neighbor-meta';
+      empty.textContent = '表示中のつながりはありません';
+      neighborList.appendChild(empty);
+      return;
+    }
+    entries.forEach((entry) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'neighbor-item';
+      const title = document.createElement('span');
+      title.className = 'neighbor-title';
+      title.textContent = entry.node.label;
+      const meta = document.createElement('span');
+      meta.className = 'neighbor-meta';
+      meta.textContent = `近接 ${entry.edge.matches}回 · 平均 ${entry.edge.averageGapDays}日差`;
+      button.append(title, meta);
+      button.addEventListener('click', () => selectNode(entry.node.id, true));
+      neighborList.appendChild(button);
+    });
+  }
+
+  function clearSelection() {
+    state.selectedId = null;
+    detailPanel.classList.remove('visible');
+  }
+
+  function focusNode(node) {
+    animateCameraTo(node.x, node.y, Math.max(1.15, state.camera.scale));
+  }
+
+  function animateCameraTo(cx, cy, scale) {
+    const start = { ...state.camera };
+    const started = performance.now();
+    const duration = 320;
+    function step(now) {
+      const t = Math.min(1, (now - started) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      state.camera.cx = start.cx + (cx - start.cx) * eased;
+      state.camera.cy = start.cy + (cy - start.cy) * eased;
+      state.camera.scale = start.scale + (scale - start.scale) * eased;
+      if (t < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
+  function fitGraph(animated = true) {
+    if (!state.nodes.length) return;
+    const xs = state.nodes.map((node) => node.x);
+    const ys = state.nodes.map((node) => node.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const spanX = Math.max(maxX - minX, 160);
+    const spanY = Math.max(maxY - minY, 160);
+    const scale = Math.min(
+      1.35,
+      Math.max(.18, Math.min((state.width - 140) / spanX, (state.height - 140) / spanY))
+    );
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    if (animated) animateCameraTo(cx, cy, scale);
+    else state.camera = { cx, cy, scale };
+  }
+
+  function handleSearch() {
+    const query = searchInput.value.trim().toLowerCase();
+    searchResults.innerHTML = '';
+    if (!query) {
+      searchResults.classList.remove('visible');
+      return;
+    }
+    const matches = state.nodes
+      .filter((node) => node.label.toLowerCase().includes(query))
+      .sort((a, b) => b.strength - a.strength)
+      .slice(0, 8);
+    matches.forEach((node) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'search-result';
+      button.textContent = node.label;
+      button.addEventListener('mousedown', (event) => event.preventDefault());
+      button.addEventListener('click', () => {
+        searchInput.value = node.label;
+        searchResults.classList.remove('visible');
+        selectNode(node.id, true);
+      });
+      searchResults.appendChild(button);
+    });
+    searchResults.classList.toggle('visible', matches.length > 0);
+  }
+
+  searchInput.addEventListener('input', handleSearch);
+  searchInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      searchInput.value = '';
+      searchResults.classList.remove('visible');
+      searchInput.blur();
+    }
+    if (event.key === 'Enter') {
+      const first = searchResults.querySelector('.search-result');
+      if (first) first.click();
+    }
+  });
+  searchInput.addEventListener('blur', () => setTimeout(() => searchResults.classList.remove('visible'), 120));
+
+  fitButton.addEventListener('click', () => fitGraph(true));
+  thresholdSlider.addEventListener('input', applyThreshold);
+  closeDetailButton.addEventListener('click', clearSelection);
+
+  refreshButton.addEventListener('click', () => loadGraph(true));
+
+  function showLoading(refreshing) {
+    loadingTitle.textContent = refreshing ? '関係を再計算しています' : '関係を読み込んでいます';
+    loadingSub.textContent = refreshing
+      ? '比較年度の編集履歴からネットワークを作り直します'
+      : '編集履歴からネットワークを組み立てます';
+    loadingState.classList.remove('hidden');
+    emptyState.classList.add('hidden');
+    refreshButton.disabled = true;
+  }
+
+  function hideLoading() {
+    loadingState.classList.add('hidden');
+    refreshButton.disabled = false;
+  }
+
+  function showError(error) {
+    hideLoading();
+    emptyState.classList.remove('hidden');
+    const message = String(error && error.message ? error.message : error || '不明なエラー');
+    if (/Config|対象フォルダ|対象ユーザー/.test(message)) {
+      emptyTitle.textContent = 'Configの設定が必要です';
+      emptyMessage.textContent = message;
+    } else {
+      emptyTitle.textContent = 'グラフを読み込めませんでした';
+      emptyMessage.textContent = message;
+    }
+  }
+
+  function loadGraph(forceRefresh) {
+    showLoading(Boolean(forceRefresh));
+    const runner = google.script.run
+      .withSuccessHandler((payload) => initializeGraph(payload))
+      .withFailureHandler(showError);
+    if (forceRefresh) runner.refreshGraphPayload();
+    else runner.getGraphPayload(false);
+  }
+
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+  loadGraph(false);
+})();
+</script>
