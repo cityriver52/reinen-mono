@@ -1,4 +1,4 @@
-function loadGraphCache_() {
+function loadGraphCache_(expectedFingerprint) {
   const ss = getGraphSpreadsheet_();
   const sheet = ss.getSheetByName(GRAPH_SETTINGS.cacheSheet);
   if (!sheet) return null;
@@ -18,7 +18,9 @@ function loadGraphCache_() {
   if (!json) return null;
 
   try {
-    return JSON.parse(json);
+    const payload = JSON.parse(json);
+    if (expectedFingerprint && payload.configFingerprint !== expectedFingerprint) return null;
+    return payload;
   } catch (error) {
     return null;
   }
@@ -42,6 +44,7 @@ function saveGraphCache_(payload) {
   sheet.getRange('A1').setValue(new Date());
   sheet.getRange('B1').setValue(chunks.length);
   sheet.getRange('C1').setValue(payload.fiscalYear || '');
+  sheet.getRange('D1').setValue(payload.configFingerprint || '');
   if (chunks.length) sheet.getRange(2, 1, chunks.length, 1).setValues(chunks);
   if (!sheet.isSheetHidden()) sheet.hideSheet();
 }
