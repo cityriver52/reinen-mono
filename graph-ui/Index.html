@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <?!= includeGraphHtml_('Styles'); ?>
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="graphCanvas" aria-label="ファイル関係グラフ"></canvas>
+
+      <header class="toolbar glass">
+        <div class="brand" title="Re:年モノ Graph">
+          <span class="brand-mark"></span>
+          <span class="brand-text">Graph</span>
+        </div>
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.3-4.3m2.3-5.2A7.5 7.5 0 1 1 4 11.5a7.5 7.5 0 0 1 15 0Z"/></svg>
+          <input id="searchInput" type="search" autocomplete="off" placeholder="ファイルを検索" aria-label="ファイルを検索">
+          <div id="searchResults" class="search-results"></div>
+        </div>
+      </header>
+
+      <div class="toolbar-actions glass">
+        <button id="fitButton" class="icon-button" type="button" title="全体を表示" aria-label="全体を表示">
+          <svg viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"/></svg>
+        </button>
+        <button id="refreshButton" class="icon-button" type="button" title="データを更新" aria-label="データを更新">
+          <svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5m10.1-3A8 8 0 0 0 5.5 6M4.9 15A8 8 0 0 0 18.5 18"/></svg>
+        </button>
+      </div>
+
+      <section class="graph-controls glass" aria-label="グラフ表示設定">
+        <div class="control-row">
+          <span class="control-label">関係の強さ</span>
+          <span id="thresholdValue" class="control-value">すべて</span>
+        </div>
+        <input id="thresholdSlider" type="range" min="0" max="100" value="0" step="1" aria-label="表示する関係の強さ">
+        <div id="graphStats" class="graph-stats">読み込み中</div>
+      </section>
+
+      <aside id="detailPanel" class="detail-panel glass" aria-live="polite">
+        <button id="closeDetailButton" class="panel-close" type="button" aria-label="詳細を閉じる">×</button>
+        <div class="detail-kicker">FILE</div>
+        <h1 id="detailTitle" class="detail-title"></h1>
+        <div id="detailPath" class="detail-path"></div>
+        <div class="detail-metrics">
+          <div><strong id="detailDegree">0</strong><span>つながり</span></div>
+          <div><strong id="detailActiveDays">0</strong><span>活動日</span></div>
+          <div><strong id="detailEdits">0</strong><span>編集</span></div>
+        </div>
+        <button id="openDriveButton" class="primary-button" type="button">Driveで開く</button>
+        <div class="neighbors-heading">強くつながるファイル</div>
+        <div id="neighborList" class="neighbor-list"></div>
+      </aside>
+
+      <div id="hoverTip" class="hover-tip"></div>
+
+      <div id="loadingState" class="loading-state">
+        <div class="loading-orbit"><span></span><span></span><span></span></div>
+        <div id="loadingTitle" class="loading-title">関係を読み込んでいます</div>
+        <div id="loadingSub" class="loading-sub">編集履歴からネットワークを組み立てます</div>
+      </div>
+
+      <div id="emptyState" class="empty-state hidden">
+        <div class="empty-mark">○</div>
+        <h2 id="emptyTitle">表示できる関係がありません</h2>
+        <p id="emptyMessage">Configに対象フォルダと対象ユーザーを設定してから更新してください。</p>
+      </div>
+
+      <footer class="hint glass">
+        ドラッグで移動 · ホイールで拡大縮小 · ノードをクリックで近傍表示 · ダブルクリックでDrive
+      </footer>
+    </main>
+
+    <?!= includeGraphHtml_('App'); ?>
+  </body>
+</html>
