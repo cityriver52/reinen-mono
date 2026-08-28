@@ -16,15 +16,14 @@
 
 ## 専用スプレッドシート
 
-このアプリ専用に次のGoogle Sheetを使います。
-
-- `Re:年モノ Graph`
-- Spreadsheet ID: `1AD8G5ugPDvlkQMZ4Pq3XWYlTT5nWjPxoS62xPGuYVZ4`
+`Re:年モノ Graph` という専用Google Sheetを使います。
 
 シート構成:
 
 - `Config`: 対象フォルダ・対象ユーザー・比較年度だけを設定
 - `GraphCache`: Web UI用JSONキャッシュ。非表示
+
+スプレッドシートIDはコードへ固定しません。コピー先ごとに異なるため、初回にカスタムメニューからそのスプレッドシート自身をApps Scriptへ登録します。
 
 ### Config
 
@@ -33,6 +32,19 @@
 - E4: 比較年度。空欄なら1年前の今日が属する年度を自動設定
 
 B列とD列は解決したフォルダ名・ユーザー表示名を自動記入します。
+
+## 初回セットアップ
+
+1. `Re:年モノ Graph` スプレッドシートに `graph-ui/` のApps Scriptコードを配置する
+2. スプレッドシートを再読み込みする
+3. A列・C列（必要ならE4）を入力する
+4. スプレッドシート上部メニューから `Re:年モノ Graph > ① このスプシをGraphに接続` を実行する
+5. 初回権限確認を許可する
+6. B列のフォルダ名、D列の表示名が自動入力されることを確認する
+7. 必要なら `② Configを検証・自動欄を更新` で再検証する
+8. Webアプリとしてデプロイする
+
+Webアプリ実行時は「アクティブなスプレッドシート」という概念がないため、初回接続時にScript PropertiesへそのスプレッドシートIDを保存します。これによりコピー先でも元テンプレートのIDへ誤接続しません。
 
 ## UI
 
@@ -116,7 +128,7 @@ Webアプリとしてデプロイすると`Index.html`がUIになります。実
 ```text
 graph-ui/
 ├─ appsscript.json
-├─ Config.gs       専用Sheet / 対象範囲 / 年度
+├─ Config.gs       専用Sheet / 対象範囲 / 年度 / スプシ自己登録
 ├─ Activity.gs     Drive Activity取得
 ├─ Model.gs        共起・Lift・コミュニティ
 ├─ Cache.gs        GraphCache
