@@ -1,0 +1,35 @@
+<script>
+(() => {
+  const button = document.getElementById('refreshButton');
+  if (!button) return;
+
+  // App.htmlの描画ループを増殖させないよう、再計算後はページ自体を読み直す。
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+
+    const loadingState = document.getElementById('loadingState');
+    const loadingTitle = document.getElementById('loadingTitle');
+    const loadingSub = document.getElementById('loadingSub');
+    const emptyState = document.getElementById('emptyState');
+    button.disabled = true;
+    if (emptyState) emptyState.classList.add('hidden');
+    if (loadingTitle) loadingTitle.textContent = '関係を再計算しています';
+    if (loadingSub) loadingSub.textContent = '比較年度の編集履歴からネットワークを作り直します';
+    if (loadingState) loadingState.classList.remove('hidden');
+
+    google.script.run
+      .withSuccessHandler(() => window.location.reload())
+      .withFailureHandler((error) => {
+        button.disabled = false;
+        if (loadingState) loadingState.classList.add('hidden');
+        if (emptyState) emptyState.classList.remove('hidden');
+        const title = document.getElementById('emptyTitle');
+        const message = document.getElementById('emptyMessage');
+        if (title) title.textContent = '再計算できませんでした';
+        if (message) message.textContent = String(error && error.message ? error.message : error || '不明なエラー');
+      })
+      .refreshGraphPayload();
+  }, true);
+})();
+</script>
